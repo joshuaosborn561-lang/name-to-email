@@ -139,6 +139,22 @@ docker compose up --build
 the env vars above. Railway injects `DATABASE_URL` and `PORT`; `postgres://`
 is rewritten to `postgresql+asyncpg://` automatically.
 
+### Railway Remote MCP (HTTPS)
+
+This repo is wired to Railway's hosted MCP at `https://mcp.railway.com` via
+`.cursor/mcp.json`. That is the HTTPS / OAuth server — not the local
+`railway mcp` stdio process, which needs the CLI on PATH and fails in cloud
+agents.
+
+1. Open **Settings → Cursor Settings → Tools & MCP**.
+2. Find **railway** and click **Connect**. Cursor opens Railway OAuth.
+3. Grant access to the workspace that should host this finder.
+4. Reload MCP if tools do not appear.
+
+After that, agents can create the project, attach Postgres, set env vars, and
+deploy this service without a local Railway CLI. One-click install also lives
+at [mcp.railway.com](https://railway.com/mcp).
+
 A container restart does not re-bill: per-row state lives in `people`, and
 `verifications` is a global cache keyed by email. Interrupted runs resume
 pending rows. `max_cost` / `DEFAULT_COST_CEILING` stops a run cleanly and
