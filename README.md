@@ -59,7 +59,6 @@ Required env (see `.env.example`):
 - `DATABASE_URL`
 - `MILLIONVERIFIER_API_KEY`
 - `NO2BOUNCE_API_KEY`
-- `API_KEY` (static header for the HTTP API)
 - `MAX_CONCURRENCY` (default 5)
 - `DEFAULT_COST_CEILING`
 
@@ -87,7 +86,7 @@ icloud, …) are flagged `personal_domain` and never permuted.
 
 ## HTTP
 
-Auth: `X-API-Key` (or `Authorization: Bearer`).
+No auth. Endpoints are open.
 
 | Method | Path | Purpose |
 |---|---|---|

@@ -11,7 +11,6 @@ import finder.api as api_mod
 @pytest.fixture
 async def api_client(tmp_path, monkeypatch):
     settings = Settings.load()
-    settings.api_key = "test-key"
     settings.database_url = f"sqlite+aiosqlite:///{tmp_path}/api.db"
     engine = create_engine(settings.async_database_url)
     await init_db(engine)
@@ -48,19 +47,18 @@ async def test_health_open(api_client):
     assert res.json()["status"] == "ok"
 
 
-async def test_auth_required(api_client):
+async def test_verify_open(api_client):
     client, _ = api_client
     res = await client.post("/verify", json={"first": "Jane", "last": "Doe", "domain": "acme.test"})
-    assert res.status_code == 401
+    assert res.status_code == 200
+    assert res.json()["email"] == "jane.doe@acme.test"
 
 
 async def test_verify_and_run(api_client):
     client, _ = api_client
-    headers = {"X-API-Key": "test-key"}
     res = await client.post(
         "/verify",
         json={"first": "Jane", "last": "Doe", "domain": "acme.test"},
-        headers=headers,
     )
     assert res.status_code == 200
     body = res.json()
@@ -77,22 +75,21 @@ async def test_verify_and_run(api_client):
             ],
             "max_cost": 5,
         },
-        headers=headers,
     )
     assert res.status_code == 200
     run_id = res.json()["run_id"]
     # Background task may still be running; poll briefly.
     for _ in range(50):
-        status = await client.get(f"/runs/{run_id}", headers=headers)
+        status = await client.get(f"/runs/{run_id}")
         if status.json()["status"] in {"completed", "stopped", "failed"}:
             break
         import asyncio
 
         await asyncio.sleep(0.05)
-    export = await client.get(f"/runs/{run_id}/export", params={"segment": "valid"}, headers=headers)
+    export = await client.get(f"/runs/{run_id}/export", params={"segment": "valid"})
     assert export.status_code == 200
     assert "jane.doe@acme.test" in export.text
     unresolved = await client.get(
-        f"/runs/{run_id}/export", params={"segment": "unresolved"}, headers=headers
+        f"/runs/{run_id}/export", params={"segment": "unresolved"}
     )
     assert "insufficient_name" in unresolved.text

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -30,22 +30,6 @@ settings: Settings
 engine: AsyncEngine
 factory: async_sessionmaker[AsyncSession]
 _tasks: set[asyncio.Task] = set()
-
-
-def get_settings() -> Settings:
-    return settings
-
-
-async def require_api_key(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    authorization: str | None = Header(default=None),
-) -> None:
-    expected = settings.api_key
-    provided = x_api_key
-    if not provided and authorization and authorization.lower().startswith("bearer "):
-        provided = authorization.split(" ", 1)[1]
-    if not expected or provided != expected:
-        raise HTTPException(status_code=401, detail="invalid api key")
 
 
 @asynccontextmanager
@@ -126,7 +110,7 @@ def _ingest_kwargs(column_map: dict[str, str] | None = None) -> dict[str, Any]:
     )
 
 
-@app.post("/runs", dependencies=[Depends(require_api_key)])
+@app.post("/runs")
 async def start_run(body: RunRequest) -> dict[str, Any]:
     kwargs = _ingest_kwargs(body.column_map)
     if body.people:
@@ -152,7 +136,7 @@ async def start_run(body: RunRequest) -> dict[str, Any]:
     return payload
 
 
-@app.post("/runs/upload", dependencies=[Depends(require_api_key)])
+@app.post("/runs/upload")
 async def start_run_upload(
     file: UploadFile = File(...),
     max_cost: float | None = Query(default=None),
@@ -170,7 +154,7 @@ async def start_run_upload(
     return payload
 
 
-@app.get("/runs/{run_id}", dependencies=[Depends(require_api_key)])
+@app.get("/runs/{run_id}")
 async def get_run(run_id: uuid.UUID) -> dict[str, Any]:
     async with factory() as session:
         run = await session.get(Run, run_id)
@@ -181,7 +165,7 @@ async def get_run(run_id: uuid.UUID) -> dict[str, Any]:
         return _status_payload(run)
 
 
-@app.get("/runs/{run_id}/export", dependencies=[Depends(require_api_key)])
+@app.get("/runs/{run_id}/export")
 async def export_run(
     run_id: uuid.UUID,
     segment: str = Query(..., pattern="^(valid|catchall|unresolved)$"),
@@ -199,7 +183,7 @@ async def export_run(
     return PlainTextResponse(write_csv(rows), media_type="text/csv")
 
 
-@app.post("/verify", dependencies=[Depends(require_api_key)])
+@app.post("/verify")
 async def verify_one(body: VerifyRequest) -> dict[str, Any]:
     person_n = normalize_person(
         body.first,

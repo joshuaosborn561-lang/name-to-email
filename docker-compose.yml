@@ -22,7 +22,6 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://finder:finder@db:5432/finder
-      API_KEY: ${API_KEY:-dev-key}
       MILLIONVERIFIER_API_KEY: ${MILLIONVERIFIER_API_KEY:-}
       NO2BOUNCE_API_KEY: ${NO2BOUNCE_API_KEY:-}
       MAX_CONCURRENCY: ${MAX_CONCURRENCY:-5}

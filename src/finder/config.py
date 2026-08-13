@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./finder.db"
     millionverifier_api_key: str = ""
     no2bounce_api_key: str = ""
-    api_key: str = "change-me"
     max_concurrency: int = 5
     default_cost_ceiling: float = 25.0
     finder_config: Path | None = None
