@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "railway": {
-      "url": "https://mcp.railway.com"
+    "name-to-email": {
+      "url": "https://finder-production-e298.up.railway.app"
     }
   }
 }

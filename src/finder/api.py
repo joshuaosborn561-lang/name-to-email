@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from starlette.middleware.cors import CORSMiddleware
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
@@ -23,6 +24,8 @@ from finder.ingest import IngestedRow, ingest_csv_text, ingest_records
 from finder.models import DomainPattern, Person, Run
 from finder.normalize import normalize_person
 from finder.verifiers.waterfall import build_verifier
+from finder.mcp_http import router as mcp_router
+from finder.oauth_open import router as oauth_router
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="name-to-email", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["mcp-session-id", "mcp-protocol-version", "WWW-Authenticate"],
+)
+app.include_router(oauth_router)
+app.include_router(mcp_router)
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "service": "name-to-email",
+        "health": "/health",
+        "docs": "/docs",
+        "mcp": "/mcp",
+        "verify": "/verify",
+    }
 
 
 class VerifyRequest(BaseModel):
