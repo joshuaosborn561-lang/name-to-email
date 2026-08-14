@@ -1,0 +1,132 @@
+# Candidate templates, most common first. Re-tune from observed hit rates.
+# Tokens: {first} {last} {f} {l}  — local-part only; @domain is appended.
+patterns:
+  - "{first}.{last}"
+  - "{f}{last}"
+  - "{first}"
+  - "{first}{last}"
+  - "{f}.{last}"
+  - "{last}"
+  - "{first}_{last}"
+  - "{first}{l}"
+  - "{last}.{first}"
+  - "{f}{l}"
+
+# Hard cap on unique addresses generated per person (after name-variant expansion).
+max_candidates: 10
+
+# Trust a stored domain pattern after this many consistent confirmations.
+pattern_trust_threshold: 2
+
+catchall:
+  # Deliberately fake local-part used to probe whether a domain accepts all mail.
+  probe_local: "zzq-nope-9f3a2b"
+  ttl_days: 30
+
+personal_domains:
+  - gmail.com
+  - googlemail.com
+  - yahoo.com
+  - ymail.com
+  - outlook.com
+  - hotmail.com
+  - live.com
+  - msn.com
+  - aol.com
+  - icloud.com
+  - me.com
+  - mac.com
+  - protonmail.com
+  - proton.me
+
+name:
+  suffixes:
+    - jr
+    - sr
+    - ii
+    - iii
+    - iv
+    - v
+  credentials:
+    - mba
+    - ase
+    - cpa
+    - cfa
+    - phd
+    - md
+    - esq
+    - dds
+    - csm
+    - gm
+    - gsm
+
+# Header auto-detection for raw scrape exports.
+columns:
+  first:
+    - first_name
+    - first
+    - fname
+    - given_name
+    - givenname
+    - firstname
+  last:
+    - last_name
+    - last
+    - lname
+    - surname
+    - family_name
+    - lastname
+  name:
+    - name
+    - full_name
+    - fullname
+    - contact_name
+    - contact
+    - person
+  domain:
+    - domain
+    - website
+    - url
+    - company_domain
+    - company_website
+    - email_domain
+    - company_url
+    - web
+    - site
+  email:
+    - email
+    - work_email
+    - e-mail
+    - email_address
+    - workemail
+
+verifiers:
+  order:
+    - millionverifier
+    - no2bounce
+  millionverifier:
+    base_url: "https://api.millionverifier.com/api/v3/"
+    timeout_seconds: 20
+    # Charged for ok / invalid / disposable. Catch-all and unknown are free.
+    cost_usd: 0.00178
+    billed_statuses:
+      - valid
+      - invalid
+  no2bounce:
+    # Real-time Reacher endpoint used by No2Bounce.
+    base_url: "https://api.reacher.email/v0/check_email"
+    timeout_seconds: 30
+    cost_usd: 0.008
+    billed_statuses:
+      - valid
+      - invalid
+      - catchall
+
+rate_limit:
+  max_retries: 5
+  base_delay_seconds: 0.5
+  max_delay_seconds: 30
+
+eval:
+  holdout_size: 50
+  vendor_cost_per_email: 0.01
