@@ -74,6 +74,9 @@ class Person(Base):
     passthrough: Mapped[dict] = mapped_column(JSONType, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    pattern_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sighted: Mapped[bool] = mapped_column(Boolean, default=False)
+    hunter_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     run: Mapped[Run] = relationship(back_populates="people")
 
@@ -90,6 +93,22 @@ class DomainPattern(Base):
     catchall_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class DomainEmailPattern(Base):
+    """Permanent Hunter domain pattern cache, local mirror of the Supabase table."""
+
+    __tablename__ = "domain_email_patterns"
+
+    domain: Mapped[str] = mapped_column(String(255), primary_key=True)
+    pattern: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    organization: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sighted_emails: Mapped[list] = mapped_column(JSONType, default=list)
+    accept_all: Mapped[bool] = mapped_column(Boolean, default=False)
+    webmail: Mapped[bool] = mapped_column(Boolean, default=False)
+    hunter_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    source: Mapped[str] = mapped_column(String(32), default="hunter")
 
 
 class Verification(Base):

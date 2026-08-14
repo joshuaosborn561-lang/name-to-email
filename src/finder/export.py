@@ -19,6 +19,9 @@ OUTPUT_FIELDS = [
     "verifier",
     "domain_is_catchall",
     "confidence",
+    "pattern_source",
+    "sighted",
+    "hunter_confidence",
     "first",
     "last",
     "domain",
@@ -28,7 +31,7 @@ OUTPUT_FIELDS = [
 def segment_for(person: Person) -> str:
     if person.status == "valid":
         return "valid"
-    if person.status == "catchall":
+    if person.status in {"catchall", "catchall_pattern"}:
         return "catchall"
     return "unresolved"
 
@@ -44,6 +47,9 @@ def _row(person: Person) -> dict[str, str]:
             "verifier": person.verifier or "",
             "domain_is_catchall": "true" if person.domain_is_catchall else "false",
             "confidence": person.confidence or "",
+            "pattern_source": person.pattern_source or "",
+            "sighted": "true" if person.sighted else "false",
+            "hunter_confidence": "" if person.hunter_confidence is None else str(person.hunter_confidence),
             "first": person.first,
             "last": person.last,
             "domain": person.norm_domain or person.domain,

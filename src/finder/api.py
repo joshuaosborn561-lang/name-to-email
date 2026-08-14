@@ -19,6 +19,8 @@ from starlette.middleware.cors import CORSMiddleware
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
 from finder.engine import CostTracker, compute_stats, create_run, execute_run, process_person, probe_catchall
+from finder.hunter import HunterBudget
+from finder.hunter_cache import resolve_hunter_pattern
 from finder.export import SEGMENTS, segment_for, write_csv
 from finder.ingest import IngestedRow, ingest_csv_text, ingest_records
 from finder.models import DomainPattern, Person, Run
@@ -95,12 +97,14 @@ class RunStatus(BaseModel):
 
 
 def _status_payload(run: Run) -> dict[str, Any]:
+    stats = run.stats or {}
     return {
         "id": str(run.id),
         "status": run.status,
         "cost_usd": float(run.cost_usd or 0),
         "cost_ceiling": float(run.cost_ceiling) if run.cost_ceiling is not None else None,
-        "stats": run.stats or {},
+        "stats": stats,
+        "hunter_calls": int(stats.get("hunter_calls") or 0),
         "error": run.error,
     }
 
@@ -184,7 +188,7 @@ async def get_run(run_id: uuid.UUID) -> dict[str, Any]:
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
         if not run.stats:
-            run.stats = await compute_stats(session, run.id, run.cost_usd)
+            run.stats = await compute_stats(session, run.id, run.cost_usd, hunter_calls=0)
         return _status_payload(run)
 
 
@@ -247,11 +251,36 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
         await session.flush()
         cost = CostTracker(Decimal(str(settings.default_cost_ceiling)))
         cache: dict[str, bool] = {}
-        is_catchall = await probe_catchall(
-            session, verifier, person_n.domain, settings, cost, cache
+        hunter_budget = HunterBudget(max_calls=settings.max_hunter_calls)
+        hunter_client = None
+        if settings.hunter_api_key:
+            from finder.hunter import HunterClient
+
+            hunter_client = HunterClient(settings.hunter_api_key)
+        hunter_ctx = await resolve_hunter_pattern(
+            session, person_n.domain, settings, hunter_client, hunter_budget
         )
+        hunter_accept_all = bool(hunter_ctx.accept_all)
+        if hunter_accept_all:
+            is_catchall = True
+        else:
+            is_catchall = await probe_catchall(
+                session, verifier, person_n.domain, settings, cost, cache
+            )
         pattern_row = await session.get(DomainPattern, person_n.domain)
-        await process_person(session, record, verifier, settings, cost, is_catchall, pattern_row)
+        await process_person(
+            session,
+            record,
+            verifier,
+            settings,
+            cost,
+            is_catchall,
+            pattern_row,
+            hunter_ctx=hunter_ctx,
+            hunter_client=hunter_client,
+            hunter_budget=hunter_budget,
+            hunter_accept_all=hunter_accept_all,
+        )
         await session.commit()
         return {
             "email": record.email,
@@ -261,6 +290,9 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             "verifier": record.verifier,
             "domain_is_catchall": record.domain_is_catchall,
             "confidence": record.confidence,
+            "pattern_source": record.pattern_source,
+            "sighted": bool(record.sighted),
+            "hunter_confidence": record.hunter_confidence,
             "cost_usd": float(cost.snapshot()),
         }
 

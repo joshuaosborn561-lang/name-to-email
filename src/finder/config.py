@@ -43,8 +43,13 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./finder.db"
     millionverifier_api_key: str = ""
     no2bounce_api_key: str = ""
+    hunter_api_key: str = ""
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
     max_concurrency: int = 5
     default_cost_ceiling: float = 25.0
+    max_hunter_calls: int = 200
+    hunter_cache_ttl_days: int = 180
     finder_config: Path | None = None
 
     yaml_data: dict[str, Any] = Field(default_factory=dict, exclude=True)

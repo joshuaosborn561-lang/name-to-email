@@ -8,9 +8,21 @@ from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
 
 
+@pytest.fixture(autouse=True)
+def _no_paid_hunter(monkeypatch):
+    monkeypatch.setenv("HUNTER_API_KEY", "")
+    monkeypatch.setenv("SUPABASE_URL", "")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+
 @pytest.fixture
 def settings() -> Settings:
-    return Settings.load()
+    loaded = Settings.load()
+    loaded.hunter_api_key = ""
+    loaded.supabase_url = ""
+    loaded.supabase_service_role_key = ""
+    loaded.max_hunter_calls = 200
+    return loaded
 
 
 @pytest.fixture
