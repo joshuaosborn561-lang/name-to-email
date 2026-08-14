@@ -45,6 +45,7 @@ class Run(Base):
     stats: Mapped[dict] = mapped_column(JSONType, default=dict)
     source: Mapped[str] = mapped_column(String(255), default="")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hunter_calls: Mapped[int] = mapped_column(Integer, default=0)
 
     people: Mapped[list["Person"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 

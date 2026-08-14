@@ -97,14 +97,16 @@ class RunStatus(BaseModel):
 
 
 def _status_payload(run: Run) -> dict[str, Any]:
-    stats = run.stats or {}
+    stats = dict(run.stats or {})
+    hunter_calls = int(getattr(run, "hunter_calls", 0) or stats.get("hunter_calls") or 0)
+    stats["hunter_calls"] = hunter_calls
     return {
         "id": str(run.id),
         "status": run.status,
         "cost_usd": float(run.cost_usd or 0),
         "cost_ceiling": float(run.cost_ceiling) if run.cost_ceiling is not None else None,
         "stats": stats,
-        "hunter_calls": int(stats.get("hunter_calls") or 0),
+        "hunter_calls": hunter_calls,
         "error": run.error,
     }
 
@@ -187,8 +189,11 @@ async def get_run(run_id: uuid.UUID) -> dict[str, Any]:
         run = await session.get(Run, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        if not run.stats:
-            run.stats = await compute_stats(session, run.id, run.cost_usd, hunter_calls=0)
+        stored_calls = int(getattr(run, "hunter_calls", 0) or (run.stats or {}).get("hunter_calls") or 0)
+        if not run.stats or not (run.stats or {}).get("rows_in"):
+            run.stats = await compute_stats(
+                session, run.id, run.cost_usd, hunter_calls=stored_calls
+            )
         return _status_payload(run)
 
 

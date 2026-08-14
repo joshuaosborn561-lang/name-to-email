@@ -253,10 +253,22 @@ async def resolve_hunter_pattern(
     try:
         fetched = await client.domain_search(domain, limit=10)
     except Exception:
+        logger.info(
+            "Hunter call endpoint=domain-search domain=%s result=error used=%s cap=%s",
+            domain,
+            budget.used,
+            budget.max_calls,
+        )
         logger.exception("Hunter domain search failed for %s, continuing with inference", domain)
         return HunterDomainContext(row=None, origin="none")
 
     if fetched is None:
+        logger.info(
+            "Hunter call endpoint=domain-search domain=%s result=no_data used=%s cap=%s",
+            domain,
+            budget.used,
+            budget.max_calls,
+        )
         return HunterDomainContext(row=None, origin="none")
 
     fetched.from_cache = False
@@ -268,6 +280,16 @@ async def resolve_hunter_pattern(
         await put_supabase(settings, fetched, client=supabase_http)
     except Exception:
         logger.exception("Failed to store Hunter pattern in Supabase for %s", domain)
+    result = "pattern" if fetched.pattern else ("accept_all" if fetched.accept_all else "empty")
+    logger.info(
+        "Hunter call endpoint=domain-search domain=%s result=%s pattern=%s accept_all=%s used=%s cap=%s",
+        domain,
+        result,
+        fetched.pattern,
+        fetched.accept_all,
+        budget.used,
+        budget.max_calls,
+    )
     return HunterDomainContext(row=fetched, origin="hunter")
 
 

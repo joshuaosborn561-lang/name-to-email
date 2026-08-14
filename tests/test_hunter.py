@@ -520,6 +520,52 @@ async def test_stale_cache_refetches(db, settings: Settings):
     assert ctx.pattern == "{f}{last}"
 
 
+async def test_hunter_budget_starts_at_zero_and_is_per_instance():
+    first = HunterBudget(max_calls=300)
+    second = HunterBudget(max_calls=300)
+    assert first.used == 0
+    assert second.used == 0
+    assert await first.consume() is True
+    assert first.used == 1
+    assert second.used == 0
+    first.used = 300
+    assert await first.consume() is False
+    assert await second.consume() is True
+    assert second.used == 1
+
+
+async def test_get_run_reports_live_hunter_calls(db, settings: Settings):
+    from finder.api import _status_payload
+    from finder.models import Run
+
+    factory = db
+    async with factory() as session:
+        run = Run(status="running", source="test", stats={}, hunter_calls=17)
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        payload = _status_payload(run)
+    assert payload["hunter_calls"] == 17
+    assert payload["stats"]["hunter_calls"] == 17
+
+
+async def test_client_logs_each_hunter_call(caplog):
+    import logging
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"domain": "log.test", "pattern": "{first}.{last}", "accept_all": False, "emails": []}},
+        )
+
+    caplog.set_level(logging.INFO, logger="finder.hunter")
+    client = HunterClient("testkey", client=_hunter_http(handler))
+    await client.domain_search("log.test")
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "Hunter call endpoint=domain-search domain=log.test" in text
+    assert "result=pattern" in text
+
+
 def test_sighted_match_requires_first_and_last():
     settings = Settings.load()
     person = normalize_person(

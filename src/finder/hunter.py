@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -87,14 +87,17 @@ class HunterAPI(Protocol):
     ) -> EmailFinderHit | None: ...
 
 
-@dataclass
 class HunterBudget:
-    max_calls: int = 200
-    used: int = 0
-    _logged: bool = False
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Per run Hunter HTTP counter. A new instance starts at zero."""
+
+    def __init__(self, max_calls: int = 200) -> None:
+        self.max_calls = int(max_calls) if max_calls is not None else 200
+        self.used = 0
+        self._logged = False
+        self._lock = asyncio.Lock()
 
     async def consume(self) -> bool:
+        """Claim one slot immediately before a Hunter HTTP call. Does not share state across runs."""
         async with self._lock:
             if self.used >= self.max_calls:
                 if not self._logged:
@@ -227,6 +230,10 @@ class HunterClient:
                 if owns:
                     await http.aclose()
         except httpx.HTTPError as exc:
+            logger.info(
+                "Hunter call endpoint=domain-search domain=%s http=error result=transport",
+                domain,
+            )
             logger.warning("Hunter domain search transport error for %s: %s", domain, exc)
             return None
 
@@ -237,13 +244,32 @@ class HunterClient:
                 logger.warning("Hunter domain search returned non JSON for %s", domain)
                 return empty_pattern(domain)
             if not isinstance(payload, dict) or _payload_is_empty(payload):
+                logger.info(
+                    "Hunter call endpoint=domain-search domain=%s http=%s result=empty",
+                    domain,
+                    response.status_code,
+                )
                 return empty_pattern(domain)
             parsed = pattern_from_payload(domain, payload, source="hunter")
             if parsed.pattern is None and not parsed.sighted_emails and not parsed.accept_all:
                 parsed.source = "hunter_empty"
+            result = "pattern" if parsed.pattern else ("accept_all" if parsed.accept_all else "empty")
+            logger.info(
+                "Hunter call endpoint=domain-search domain=%s http=%s result=%s pattern=%s accept_all=%s",
+                domain,
+                response.status_code,
+                result,
+                parsed.pattern,
+                parsed.accept_all,
+            )
             return parsed
 
         if response.status_code in {400, 404}:
+            logger.info(
+                "Hunter call endpoint=domain-search domain=%s http=%s result=empty",
+                domain,
+                response.status_code,
+            )
             logger.warning(
                 "Hunter domain search HTTP %s for %s, storing empty row",
                 response.status_code,
@@ -251,6 +277,11 @@ class HunterClient:
             )
             return empty_pattern(domain)
 
+        logger.info(
+            "Hunter call endpoint=domain-search domain=%s http=%s result=error",
+            domain,
+            response.status_code,
+        )
         logger.warning(
             "Hunter domain search HTTP %s for %s, continuing with inference",
             response.status_code,
@@ -281,10 +312,19 @@ class HunterClient:
                 if owns:
                     await http.aclose()
         except httpx.HTTPError as exc:
+            logger.info(
+                "Hunter call endpoint=email-finder domain=%s http=error result=transport",
+                domain,
+            )
             logger.warning("Hunter email finder transport error for %s: %s", domain, exc)
             return None
 
         if response.status_code != 200:
+            logger.info(
+                "Hunter call endpoint=email-finder domain=%s http=%s result=error",
+                domain,
+                response.status_code,
+            )
             logger.warning(
                 "Hunter email finder HTTP %s for %s, continuing with inference",
                 response.status_code,
@@ -294,12 +334,25 @@ class HunterClient:
         try:
             payload = response.json()
         except ValueError:
+            logger.info(
+                "Hunter call endpoint=email-finder domain=%s http=200 result=empty",
+                domain,
+            )
             logger.warning("Hunter email finder returned non JSON for %s", domain)
             return None
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, dict):
+            logger.info(
+                "Hunter call endpoint=email-finder domain=%s http=200 result=empty",
+                domain,
+            )
             return None
         email = str(data.get("email") or "").strip().lower() or None
+        logger.info(
+            "Hunter call endpoint=email-finder domain=%s http=200 result=%s",
+            domain,
+            "hit" if email else "empty",
+        )
         return EmailFinderHit(
             email=email,
             score=_as_int(data.get("score")),

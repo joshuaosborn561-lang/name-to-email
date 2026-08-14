@@ -41,6 +41,7 @@ def _ensure_people_columns(sync_conn) -> None:
             "ALTER TABLE people ADD COLUMN IF NOT EXISTS pattern_source VARCHAR(32)",
             "ALTER TABLE people ADD COLUMN IF NOT EXISTS sighted BOOLEAN",
             "ALTER TABLE people ADD COLUMN IF NOT EXISTS hunter_confidence INTEGER",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS hunter_calls INTEGER DEFAULT 0",
         ]
     else:
         inspector = inspect(sync_conn)
@@ -54,6 +55,10 @@ def _ensure_people_columns(sync_conn) -> None:
             statements.append("ALTER TABLE people ADD COLUMN sighted BOOLEAN DEFAULT 0")
         if "hunter_confidence" not in existing:
             statements.append("ALTER TABLE people ADD COLUMN hunter_confidence INTEGER")
+        if "runs" in inspector.get_table_names():
+            run_cols = {col["name"] for col in inspector.get_columns("runs")}
+            if "hunter_calls" not in run_cols:
+                statements.append("ALTER TABLE runs ADD COLUMN hunter_calls INTEGER DEFAULT 0")
     for sql in statements:
         sync_conn.execute(text(sql))
 
