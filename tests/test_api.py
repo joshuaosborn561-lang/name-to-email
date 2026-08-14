@@ -12,6 +12,9 @@ import finder.api as api_mod
 async def api_client(tmp_path, monkeypatch):
     settings = Settings.load()
     settings.database_url = f"sqlite+aiosqlite:///{tmp_path}/api.db"
+    settings.hunter_api_key = ""
+    settings.supabase_url = ""
+    settings.supabase_service_role_key = ""
     engine = create_engine(settings.async_database_url)
     await init_db(engine)
     factory = session_factory(engine)

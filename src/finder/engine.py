@@ -14,6 +14,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finder.config import Settings
+from finder.hunter import (
+    HunterAPI,
+    HunterBudget,
+    HunterDomainContext,
+    RankedCandidate,
+    build_ranked_candidates,
+    match_sighted,
+    sighted_candidate,
+)
+from finder.hunter_cache import resolve_hunter_pattern
 from finder.ingest import IngestedRow
 from finder.models import DomainPattern, Person, Run, Verification, utcnow
 from finder.normalize import NormalizedPerson
@@ -31,6 +41,7 @@ logger = logging.getLogger(__name__)
 TERMINAL = {
     "valid",
     "catchall",
+    "catchall_pattern",
     "not_found",
     "insufficient_name",
     "personal_domain",
@@ -71,7 +82,7 @@ class CostTracker:
 def _confidence(status: str, domain_is_catchall: bool, pattern_derived: bool) -> str:
     if status == "valid" and not domain_is_catchall:
         return "high"
-    if status == "catchall" and pattern_derived:
+    if status in {"catchall", "catchall_pattern"} and pattern_derived:
         return "medium"
     return "low"
 
@@ -160,6 +171,9 @@ async def _apply_result(
     domain_is_catchall: bool,
     pattern_derived: bool,
     error_message: str | None = None,
+    pattern_source: str | None = None,
+    sighted: bool = False,
+    hunter_confidence: int | None = None,
 ) -> None:
     person.status = status
     person.email = email
@@ -169,24 +183,12 @@ async def _apply_result(
     person.domain_is_catchall = domain_is_catchall
     person.confidence = _confidence(status, domain_is_catchall, pattern_derived)
     person.error_message = error_message
+    person.pattern_source = pattern_source
+    person.sighted = sighted
+    person.hunter_confidence = hunter_confidence
 
 
-async def process_person(
-    session: AsyncSession,
-    person: Person,
-    verifier: Verifier,
-    settings: Settings,
-    cost: CostTracker,
-    domain_catchall: bool,
-    pattern_row: DomainPattern | None,
-) -> DomainPattern | None:
-    if person.status in TERMINAL:
-        return pattern_row
-
-    if person.status == "pending" and not person.norm_first:
-        # insufficient / personal already tagged at ingest; keep going for pending.
-        pass
-
+def _normalized_from_person(person: Person) -> NormalizedPerson:
     normalized = NormalizedPerson(
         original_first=person.first,
         original_last=person.last,
@@ -199,11 +201,100 @@ async def process_person(
         normalized.first_variants = [person.norm_first] if person.norm_first else []
     if not normalized.last_variants:
         normalized.last_variants = [person.norm_last] if person.norm_last else []
+    return normalized
 
+
+def _source_meta(
+    ranked: RankedCandidate | None,
+    hunter_ctx: HunterDomainContext | None,
+) -> tuple[str, bool, int | None]:
+    if ranked is None or hunter_ctx is None or hunter_ctx.row is None:
+        return "inference", False, None
+    if not (ranked.sighted or ranked.from_hunter_pattern):
+        return "inference", False, None
+    confidence = hunter_ctx.hunter_confidence
+    if ranked.sighted:
+        for item in hunter_ctx.sighted_emails:
+            if str(item.get("email") or "").lower() == ranked.candidate.email.lower():
+                if item.get("confidence") is not None:
+                    confidence = item.get("confidence")
+                break
+    return hunter_ctx.pattern_source_label, ranked.sighted, confidence
+
+
+def _rank_person_candidates(
+    normalized: NormalizedPerson,
+    settings: Settings,
+    pattern_row: DomainPattern | None,
+    hunter_ctx: HunterDomainContext | None,
+) -> list[RankedCandidate]:
     known = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
     preferred = pattern_row.pattern if pattern_row and pattern_row.pattern else None
-    pattern_derived = bool(known) or (domain_catchall and bool(preferred))
+    hunter_pattern = hunter_ctx.pattern if hunter_ctx else None
+    sighted = None
+    if hunter_ctx and hunter_ctx.sighted_emails:
+        matched = match_sighted(normalized, hunter_ctx.sighted_emails)
+        if matched is not None:
+            sighted = sighted_candidate(normalized, matched, settings.patterns)
+    return build_ranked_candidates(
+        normalized,
+        settings.patterns,
+        hunter_pattern=hunter_pattern,
+        sighted=sighted,
+        known_pattern=known,
+        preferred_pattern=preferred,
+        max_candidates=settings.max_candidates,
+    )
+
+
+async def process_person(
+    session: AsyncSession,
+    person: Person,
+    verifier: Verifier,
+    settings: Settings,
+    cost: CostTracker,
+    domain_catchall: bool,
+    pattern_row: DomainPattern | None,
+    hunter_ctx: HunterDomainContext | None = None,
+    hunter_client: HunterAPI | None = None,
+    hunter_budget: HunterBudget | None = None,
+    hunter_accept_all: bool = False,
+) -> DomainPattern | None:
+    if person.status in TERMINAL:
+        return pattern_row
+
+    if person.status == "pending" and not person.norm_first:
+        pass
+
+    normalized = _normalized_from_person(person)
+    known = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
+    preferred = pattern_row.pattern if pattern_row and pattern_row.pattern else None
     emit_pattern = known or preferred
+    ranked_list = _rank_person_candidates(normalized, settings, pattern_row, hunter_ctx)
+
+    if hunter_accept_all:
+        ranked = ranked_list[0] if ranked_list else None
+        email = ranked.candidate.email if ranked else None
+        pattern = ranked.candidate.pattern if ranked else (hunter_ctx.pattern if hunter_ctx else emit_pattern)
+        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx)
+        if source == "inference" and hunter_ctx and hunter_ctx.row is not None:
+            source = hunter_ctx.pattern_source_label
+            hconf = hunter_ctx.hunter_confidence
+        await _apply_result(
+            session,
+            person,
+            status="catchall_pattern",
+            email=email,
+            pattern=pattern,
+            attempts=0,
+            verifier=None,
+            domain_is_catchall=True,
+            pattern_derived=bool(pattern),
+            pattern_source=source,
+            sighted=sighted_flag,
+            hunter_confidence=hconf,
+        )
+        return pattern_row
 
     if domain_catchall:
         candidates = generate_candidates(
@@ -225,25 +316,22 @@ async def process_person(
             verifier=None,
             domain_is_catchall=True,
             pattern_derived=bool(emit_pattern and emit_pattern == pattern and pattern_row and pattern_row.sample_count),
+            pattern_source="inference",
+            sighted=False,
+            hunter_confidence=None,
         )
         return pattern_row
 
-    candidates = generate_candidates(
-        normalized,
-        settings.patterns,
-        known_pattern=known,
-        max_candidates=settings.max_candidates,
-    )
-    if preferred and not known:
-        candidates = sorted(candidates, key=lambda c: 0 if c.pattern == preferred else 1)
     attempts = 0
-    for candidate in candidates:
+    for ranked in ranked_list:
+        candidate = ranked.candidate
         try:
             verdict = await verify_email(session, verifier, candidate.email, cost)
         except CostCeilingReached:
             raise
         attempts += 0 if verdict.from_cache else 1
         person.attempts = attempts
+        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx)
 
         if verdict.status == "valid":
             await _apply_result(
@@ -255,7 +343,10 @@ async def process_person(
                 attempts=attempts,
                 verifier=verdict.verifier,
                 domain_is_catchall=False,
-                pattern_derived=bool(known),
+                pattern_derived=bool(known) or ranked.from_hunter_pattern,
+                pattern_source=source,
+                sighted=sighted_flag,
+                hunter_confidence=hconf,
             )
             pattern_row = await record_hit(
                 session,
@@ -277,7 +368,10 @@ async def process_person(
                 attempts=attempts,
                 verifier=verdict.verifier,
                 domain_is_catchall=True,
-                pattern_derived=bool(known),
+                pattern_derived=bool(known) or ranked.from_hunter_pattern,
+                pattern_source=source,
+                sighted=sighted_flag,
+                hunter_confidence=hconf,
             )
             pattern_row = await session.get(DomainPattern, person.norm_domain)
             return pattern_row
@@ -294,8 +388,25 @@ async def process_person(
                 domain_is_catchall=False,
                 pattern_derived=False,
                 error_message=str((verdict.raw or {}).get("error") or "verifier error"),
+                pattern_source=source,
+                sighted=False,
+                hunter_confidence=None,
             )
             return pattern_row
+
+    if await _try_email_finder(
+        session,
+        person,
+        normalized,
+        verifier,
+        settings,
+        cost,
+        hunter_ctx,
+        hunter_client,
+        hunter_budget,
+        attempts,
+    ):
+        return pattern_row
 
     await _apply_result(
         session,
@@ -307,8 +418,104 @@ async def process_person(
         verifier=None,
         domain_is_catchall=False,
         pattern_derived=False,
+        pattern_source="inference",
+        sighted=False,
+        hunter_confidence=None,
     )
     return pattern_row
+
+
+async def _try_email_finder(
+    session: AsyncSession,
+    person: Person,
+    normalized: NormalizedPerson,
+    verifier: Verifier,
+    settings: Settings,
+    cost: CostTracker,
+    hunter_ctx: HunterDomainContext | None,
+    hunter_client: HunterAPI | None,
+    hunter_budget: HunterBudget | None,
+    attempts: int,
+) -> bool:
+    if hunter_ctx is not None and hunter_ctx.pattern:
+        return False
+    if hunter_client is None or hunter_budget is None:
+        return False
+    first = person.norm_first or (normalized.first_variants[0] if normalized.first_variants else "")
+    last = person.norm_last or (normalized.last_variants[0] if normalized.last_variants else "")
+    if not first or not last or not person.norm_domain:
+        return False
+    if not await hunter_budget.consume():
+        return False
+    try:
+        hit = await hunter_client.email_finder(person.norm_domain, first, last)
+    except Exception:
+        logger.exception(
+            "Hunter email finder failed for %s at %s, continuing with inference",
+            first,
+            person.norm_domain,
+        )
+        return False
+    if hit is None or not hit.email:
+        return False
+
+    source = "hunter"
+    if hit.accept_all:
+        await _apply_result(
+            session,
+            person,
+            status="catchall_pattern",
+            email=hit.email,
+            pattern=None,
+            attempts=attempts,
+            verifier=None,
+            domain_is_catchall=True,
+            pattern_derived=False,
+            pattern_source=source,
+            sighted=False,
+            hunter_confidence=hit.score,
+        )
+        return True
+
+    try:
+        verdict = await verify_email(session, verifier, hit.email, cost)
+    except CostCeilingReached:
+        raise
+    attempts += 0 if verdict.from_cache else 1
+    if verdict.status == "valid":
+        await _apply_result(
+            session,
+            person,
+            status="valid",
+            email=hit.email,
+            pattern=None,
+            attempts=attempts,
+            verifier=verdict.verifier,
+            domain_is_catchall=False,
+            pattern_derived=False,
+            pattern_source=source,
+            sighted=False,
+            hunter_confidence=hit.score,
+        )
+        return True
+    if verdict.status == "catchall":
+        await upsert_catchall(session, person.norm_domain, True)
+        await _apply_result(
+            session,
+            person,
+            status="catchall",
+            email=hit.email,
+            pattern=None,
+            attempts=attempts,
+            verifier=verdict.verifier,
+            domain_is_catchall=True,
+            pattern_derived=False,
+            pattern_source=source,
+            sighted=False,
+            hunter_confidence=hit.score,
+        )
+        return True
+    return False
 
 
 def _name_variants_from_passthrough(person: Person, which: str) -> list[str]:
@@ -327,6 +534,8 @@ async def process_domain(
     settings: Settings,
     cost: CostTracker,
     run_catchall: dict[str, bool],
+    hunter_client: HunterAPI | None = None,
+    hunter_budget: HunterBudget | None = None,
 ) -> None:
     async with factory() as session:
         try:
@@ -339,9 +548,17 @@ async def process_domain(
                 await session.commit()
                 return
 
-            is_catchall = await probe_catchall(
-                session, verifier, domain, settings, cost, run_catchall
+            hunter_ctx = await resolve_hunter_pattern(
+                session, domain, settings, hunter_client, hunter_budget
             )
+            hunter_accept_all = bool(hunter_ctx.accept_all)
+            if hunter_accept_all:
+                is_catchall = True
+                run_catchall[domain] = True
+            else:
+                is_catchall = await probe_catchall(
+                    session, verifier, domain, settings, cost, run_catchall
+                )
             pattern_row = await session.get(DomainPattern, domain)
 
             for person in pending:
@@ -355,6 +572,10 @@ async def process_domain(
                     cost,
                     is_catchall,
                     pattern_row,
+                    hunter_ctx=hunter_ctx,
+                    hunter_client=hunter_client,
+                    hunter_budget=hunter_budget,
+                    hunter_accept_all=hunter_accept_all,
                 )
                 if pattern_row and pattern_row.is_catchall:
                     is_catchall = True
@@ -378,7 +599,12 @@ async def process_domain(
             raise
 
 
-async def compute_stats(session: AsyncSession, run_id: uuid.UUID, cost_usd: Decimal) -> dict[str, Any]:
+async def compute_stats(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    cost_usd: Decimal,
+    hunter_calls: int | None = None,
+) -> dict[str, Any]:
     people = list(
         (await session.execute(select(Person).where(Person.run_id == run_id))).scalars()
     )
@@ -403,6 +629,7 @@ async def compute_stats(session: AsyncSession, run_id: uuid.UUID, cost_usd: Deci
         "cost_per_valid": (spend / hits) if hits else None,
         "status_counts": dict(counts),
         "attempts_total": sum(p.attempts or 0 for p in people),
+        "hunter_calls": int(hunter_calls or 0),
     }
     return stats
 
@@ -458,11 +685,22 @@ async def create_run(
     return run
 
 
+def _hunter_client(settings: Settings, hunter_client: HunterAPI | None) -> HunterAPI | None:
+    if hunter_client is not None:
+        return hunter_client
+    if not settings.hunter_api_key:
+        return None
+    from finder.hunter import HunterClient
+
+    return HunterClient(settings.hunter_api_key)
+
+
 async def execute_run(
     factory: async_sessionmaker[AsyncSession],
     run_id: uuid.UUID,
     settings: Settings,
     verifier: Verifier,
+    hunter_client: HunterAPI | None = None,
 ) -> Run:
     async with factory() as session:
         run = await session.get(Run, run_id)
@@ -493,6 +731,8 @@ async def execute_run(
 
     cost = CostTracker(ceiling=ceiling, spent=already)
     run_catchall: dict[str, bool] = {}
+    hunter_budget = HunterBudget(max_calls=settings.max_hunter_calls)
+    active_hunter = _hunter_client(settings, hunter_client)
     sem = asyncio.Semaphore(max(1, settings.max_concurrency))
 
     async def _one(domain: str, ids: list[uuid.UUID]) -> None:
@@ -509,7 +749,16 @@ async def execute_run(
             if cost.stopped:
                 return
             await process_domain(
-                factory, run_id, domain, ids, verifier, settings, cost, run_catchall
+                factory,
+                run_id,
+                domain,
+                ids,
+                verifier,
+                settings,
+                cost,
+                run_catchall,
+                hunter_client=active_hunter,
+                hunter_budget=hunter_budget,
             )
 
     results = await asyncio.gather(
@@ -525,7 +774,9 @@ async def execute_run(
         run = await session.get(Run, run_id)
         assert run is not None
         run.cost_usd = cost.snapshot()
-        run.stats = await compute_stats(session, run_id, run.cost_usd)
+        run.stats = await compute_stats(
+            session, run_id, run.cost_usd, hunter_calls=hunter_budget.used
+        )
         remaining = (
             await session.execute(
                 select(func.count()).select_from(Person).where(

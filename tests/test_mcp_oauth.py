@@ -83,6 +83,11 @@ def test_mcp_initialize_and_tools_list():
             json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
         assert listed.status_code == 200
-        names = {t["name"] for t in listed.json()["result"]["tools"]}
-        assert "verify_person" in names
-        assert "start_run" in names
+        tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
+        assert "verify_person" in tools
+        assert "start_run" in tools
+        verify_props = set(tools["verify_person"]["inputSchema"]["properties"])
+        assert verify_props == {"first", "last", "domain"}
+        start_props = set(tools["start_run"]["inputSchema"]["properties"])
+        assert start_props == {"people", "max_cost"}
+        assert "max_hunter_calls" not in start_props

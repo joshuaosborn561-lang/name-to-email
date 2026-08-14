@@ -129,7 +129,7 @@ def status(run_id: str) -> None:
             if run is None:
                 typer.echo("run not found", err=True)
                 raise typer.Exit(1)
-            stats = run.stats or await compute_stats(session, run.id, run.cost_usd)
+            stats = run.stats or await compute_stats(session, run.id, run.cost_usd, hunter_calls=0)
         typer.echo(
             json.dumps(
                 {
@@ -138,6 +138,7 @@ def status(run_id: str) -> None:
                     "cost_usd": str(run.cost_usd),
                     "cost_ceiling": str(run.cost_ceiling) if run.cost_ceiling is not None else None,
                     "stats": stats,
+                    "hunter_calls": int((stats or {}).get("hunter_calls") or 0),
                     "error": run.error,
                 },
                 indent=2,
@@ -268,14 +269,37 @@ def verify(
                 await session.flush()
                 cost = CostTracker(Decimal(str(settings.default_cost_ceiling)))
                 cache: dict[str, bool] = {}
-                is_catchall = await probe_catchall(
-                    session, verifier, person_n.domain, settings, cost, cache
-                )
+                from finder.hunter import HunterBudget, HunterClient
+                from finder.hunter_cache import resolve_hunter_pattern
                 from finder.models import DomainPattern
 
+                hunter_budget = HunterBudget(max_calls=settings.max_hunter_calls)
+                hunter_client = (
+                    HunterClient(settings.hunter_api_key) if settings.hunter_api_key else None
+                )
+                hunter_ctx = await resolve_hunter_pattern(
+                    session, person_n.domain, settings, hunter_client, hunter_budget
+                )
+                hunter_accept_all = bool(hunter_ctx.accept_all)
+                if hunter_accept_all:
+                    is_catchall = True
+                else:
+                    is_catchall = await probe_catchall(
+                        session, verifier, person_n.domain, settings, cost, cache
+                    )
                 pattern_row = await session.get(DomainPattern, person_n.domain)
                 await process_person(
-                    session, record, verifier, settings, cost, is_catchall, pattern_row
+                    session,
+                    record,
+                    verifier,
+                    settings,
+                    cost,
+                    is_catchall,
+                    pattern_row,
+                    hunter_ctx=hunter_ctx,
+                    hunter_client=hunter_client,
+                    hunter_budget=hunter_budget,
+                    hunter_accept_all=hunter_accept_all,
                 )
                 await session.commit()
                 result = {
@@ -286,6 +310,9 @@ def verify(
                     "verifier": record.verifier,
                     "domain_is_catchall": record.domain_is_catchall,
                     "confidence": record.confidence,
+                    "pattern_source": record.pattern_source,
+                    "sighted": bool(record.sighted),
+                    "hunter_confidence": record.hunter_confidence,
                     "cost_usd": str(cost.snapshot()),
                 }
         typer.echo(json.dumps(result, indent=2))
