@@ -450,12 +450,25 @@ async def _try_email_finder(
     try:
         hit = await hunter_client.email_finder(person.norm_domain, first, last)
     except Exception:
+        logger.info(
+            "Hunter call endpoint=email-finder domain=%s result=error used=%s cap=%s",
+            person.norm_domain,
+            hunter_budget.used,
+            hunter_budget.max_calls,
+        )
         logger.exception(
             "Hunter email finder failed for %s at %s, continuing with inference",
             first,
             person.norm_domain,
         )
         return False
+    logger.info(
+        "Hunter call endpoint=email-finder domain=%s result=%s used=%s cap=%s",
+        person.norm_domain,
+        "hit" if hit and hit.email else "empty",
+        hunter_budget.used,
+        hunter_budget.max_calls,
+    )
     if hit is None or not hit.email:
         return False
 
@@ -518,6 +531,22 @@ async def _try_email_finder(
     return False
 
 
+async def _persist_hunter_calls(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    budget: HunterBudget | None,
+) -> None:
+    if budget is None:
+        return
+    run = await session.get(Run, run_id)
+    if run is None:
+        return
+    run.hunter_calls = budget.used
+    stats = dict(run.stats or {})
+    stats["hunter_calls"] = budget.used
+    run.stats = stats
+
+
 def _name_variants_from_passthrough(person: Person, which: str) -> list[str]:
     extra = (person.passthrough or {}).get(f"_norm_{which}_variants")
     if isinstance(extra, list) and extra:
@@ -551,6 +580,7 @@ async def process_domain(
             hunter_ctx = await resolve_hunter_pattern(
                 session, domain, settings, hunter_client, hunter_budget
             )
+            await _persist_hunter_calls(session, run_id, hunter_budget)
             hunter_accept_all = bool(hunter_ctx.accept_all)
             if hunter_accept_all:
                 is_catchall = True
@@ -586,12 +616,14 @@ async def process_domain(
             if run is not None:
                 run.cost_usd = cost.snapshot()
                 run.updated_at = utcnow()
+            await _persist_hunter_calls(session, run_id, hunter_budget)
             await session.commit()
         except CostCeilingReached:
             run = await session.get(Run, run_id)
             if run is not None:
                 run.cost_usd = cost.snapshot()
                 run.updated_at = utcnow()
+            await _persist_hunter_calls(session, run_id, hunter_budget)
             await session.commit()
             raise
         except Exception:
@@ -774,6 +806,7 @@ async def execute_run(
         run = await session.get(Run, run_id)
         assert run is not None
         run.cost_usd = cost.snapshot()
+        run.hunter_calls = hunter_budget.used
         run.stats = await compute_stats(
             session, run_id, run.cost_usd, hunter_calls=hunter_budget.used
         )
