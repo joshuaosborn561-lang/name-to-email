@@ -29,7 +29,10 @@ from finder.models import DomainPattern, Person, Run, Verification, utcnow
 from finder.normalize import NormalizedPerson
 from finder.patterns import (
     catchall_is_cached,
+    deduce_pattern_from_known,
+    extra_pairs_from_people,
     record_hit,
+    remember_deduced_pattern,
     trusted_pattern,
     upsert_catchall,
 )
@@ -207,7 +210,16 @@ def _normalized_from_person(person: Person) -> NormalizedPerson:
 def _source_meta(
     ranked: RankedCandidate | None,
     hunter_ctx: HunterDomainContext | None,
+    deduced_pattern: str | None = None,
 ) -> tuple[str, bool, int | None]:
+    if (
+        ranked is not None
+        and deduced_pattern
+        and ranked.candidate.pattern == deduced_pattern
+        and not ranked.sighted
+        and not ranked.from_hunter_pattern
+    ):
+        return "known", False, None
     if ranked is None or hunter_ctx is None or hunter_ctx.row is None:
         return "inference", False, None
     if not (ranked.sighted or ranked.from_hunter_pattern):
@@ -259,6 +271,7 @@ async def process_person(
     hunter_client: HunterAPI | None = None,
     hunter_budget: HunterBudget | None = None,
     hunter_accept_all: bool = False,
+    deduced_pattern: str | None = None,
 ) -> DomainPattern | None:
     if person.status in TERMINAL:
         return pattern_row
@@ -276,7 +289,7 @@ async def process_person(
         ranked = ranked_list[0] if ranked_list else None
         email = ranked.candidate.email if ranked else None
         pattern = ranked.candidate.pattern if ranked else (hunter_ctx.pattern if hunter_ctx else emit_pattern)
-        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx)
+        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx, deduced_pattern)
         if source == "inference" and hunter_ctx and hunter_ctx.row is not None:
             source = hunter_ctx.pattern_source_label
             hconf = hunter_ctx.hunter_confidence
@@ -316,7 +329,11 @@ async def process_person(
             verifier=None,
             domain_is_catchall=True,
             pattern_derived=bool(emit_pattern and emit_pattern == pattern and pattern_row and pattern_row.sample_count),
-            pattern_source="inference",
+            pattern_source=(
+                "known"
+                if deduced_pattern and pattern == deduced_pattern
+                else "inference"
+            ),
             sighted=False,
             hunter_confidence=None,
         )
@@ -331,7 +348,7 @@ async def process_person(
             raise
         attempts += 0 if verdict.from_cache else 1
         person.attempts = attempts
-        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx)
+        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx, deduced_pattern)
 
         if verdict.status == "valid":
             await _apply_result(
@@ -554,6 +571,55 @@ def _name_variants_from_passthrough(person: Person, which: str) -> list[str]:
     return []
 
 
+async def resolve_domain_strategy(
+    session: AsyncSession,
+    domain: str,
+    settings: Settings,
+    *,
+    current_people: list[Person],
+    hunter_client: HunterAPI | None,
+    hunter_budget: HunterBudget | None,
+) -> tuple[DomainPattern | None, HunterDomainContext, str | None]:
+    """Deduce the company format from known people before any paid lookup.
+
+    Two or three colleagues at the same domain already reveal the pattern.
+    Test that first. Hunter domain search only runs when deduction cannot.
+    """
+    extras = extra_pairs_from_people(current_people, settings)
+    deduced = await deduce_pattern_from_known(
+        session, domain, settings, extra_pairs=extras
+    )
+    pattern_row = await session.get(DomainPattern, domain)
+    if deduced:
+        pattern_row = await remember_deduced_pattern(
+            session,
+            domain,
+            deduced,
+            trust_threshold=settings.pattern_trust_threshold,
+        )
+        logger.info(
+            "Deduced %s for %s from known people, skipping Hunter domain search",
+            deduced,
+            domain,
+        )
+        return pattern_row, HunterDomainContext(row=None, origin="none"), deduced
+
+    trusted = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
+    if trusted:
+        logger.info(
+            "Trusted pattern %s for %s already on file, skipping Hunter domain search",
+            trusted,
+            domain,
+        )
+        return pattern_row, HunterDomainContext(row=None, origin="none"), None
+
+    hunter_ctx = await resolve_hunter_pattern(
+        session, domain, settings, hunter_client, hunter_budget
+    )
+    pattern_row = await session.get(DomainPattern, domain)
+    return pattern_row, hunter_ctx, None
+
+
 async def process_domain(
     factory: async_sessionmaker[AsyncSession],
     run_id: uuid.UUID,
@@ -577,8 +643,13 @@ async def process_domain(
                 await session.commit()
                 return
 
-            hunter_ctx = await resolve_hunter_pattern(
-                session, domain, settings, hunter_client, hunter_budget
+            pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+                session,
+                domain,
+                settings,
+                current_people=people,
+                hunter_client=hunter_client,
+                hunter_budget=hunter_budget,
             )
             await _persist_hunter_calls(session, run_id, hunter_budget)
             hunter_accept_all = bool(hunter_ctx.accept_all)
@@ -589,7 +660,8 @@ async def process_domain(
                 is_catchall = await probe_catchall(
                     session, verifier, domain, settings, cost, run_catchall
                 )
-            pattern_row = await session.get(DomainPattern, domain)
+            if pattern_row is None:
+                pattern_row = await session.get(DomainPattern, domain)
 
             for person in pending:
                 if cost.stopped:
@@ -606,6 +678,7 @@ async def process_domain(
                     hunter_client=hunter_client,
                     hunter_budget=hunter_budget,
                     hunter_accept_all=hunter_accept_all,
+                    deduced_pattern=deduced,
                 )
                 if pattern_row and pattern_row.is_catchall:
                     is_catchall = True
@@ -705,6 +778,7 @@ async def create_run(
                 **row.passthrough,
                 "_norm_first_variants": person.first_variants,
                 "_norm_last_variants": person.last_variants,
+                **({"_source_email": row.source_email} if row.source_email else {}),
             },
         )
         if status == "personal_domain":

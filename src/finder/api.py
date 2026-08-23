@@ -18,9 +18,16 @@ from starlette.middleware.cors import CORSMiddleware
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
-from finder.engine import CostTracker, compute_stats, create_run, execute_run, process_person, probe_catchall
+from finder.engine import (
+    CostTracker,
+    compute_stats,
+    create_run,
+    execute_run,
+    process_person,
+    probe_catchall,
+    resolve_domain_strategy,
+)
 from finder.hunter import HunterBudget
-from finder.hunter_cache import resolve_hunter_pattern
 from finder.export import SEGMENTS, segment_for, write_csv
 from finder.ingest import IngestedRow, ingest_csv_text, ingest_records
 from finder.models import DomainPattern, Person, Run
@@ -262,8 +269,13 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             from finder.hunter import HunterClient
 
             hunter_client = HunterClient(settings.hunter_api_key)
-        hunter_ctx = await resolve_hunter_pattern(
-            session, person_n.domain, settings, hunter_client, hunter_budget
+        pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+            session,
+            person_n.domain,
+            settings,
+            current_people=[record],
+            hunter_client=hunter_client,
+            hunter_budget=hunter_budget,
         )
         hunter_accept_all = bool(hunter_ctx.accept_all)
         if hunter_accept_all:
@@ -272,7 +284,8 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             is_catchall = await probe_catchall(
                 session, verifier, person_n.domain, settings, cost, cache
             )
-        pattern_row = await session.get(DomainPattern, person_n.domain)
+        if pattern_row is None:
+            pattern_row = await session.get(DomainPattern, person_n.domain)
         await process_person(
             session,
             record,
@@ -285,6 +298,7 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             hunter_client=hunter_client,
             hunter_budget=hunter_budget,
             hunter_accept_all=hunter_accept_all,
+            deduced_pattern=deduced,
         )
         await session.commit()
         return {

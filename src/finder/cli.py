@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
-from finder.engine import compute_stats, create_run, execute_run
+from finder.engine import compute_stats, create_run, execute_run, resolve_domain_strategy
 from finder.eval import run_eval
 from finder.export import SEGMENTS, export_segments, write_csv
 from finder.ingest import ingest_csv_path
@@ -270,15 +270,19 @@ def verify(
                 cost = CostTracker(Decimal(str(settings.default_cost_ceiling)))
                 cache: dict[str, bool] = {}
                 from finder.hunter import HunterBudget, HunterClient
-                from finder.hunter_cache import resolve_hunter_pattern
                 from finder.models import DomainPattern
 
                 hunter_budget = HunterBudget(max_calls=settings.max_hunter_calls)
                 hunter_client = (
                     HunterClient(settings.hunter_api_key) if settings.hunter_api_key else None
                 )
-                hunter_ctx = await resolve_hunter_pattern(
-                    session, person_n.domain, settings, hunter_client, hunter_budget
+                pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+                    session,
+                    person_n.domain,
+                    settings,
+                    current_people=[record],
+                    hunter_client=hunter_client,
+                    hunter_budget=hunter_budget,
                 )
                 hunter_accept_all = bool(hunter_ctx.accept_all)
                 if hunter_accept_all:
@@ -287,7 +291,8 @@ def verify(
                     is_catchall = await probe_catchall(
                         session, verifier, person_n.domain, settings, cost, cache
                     )
-                pattern_row = await session.get(DomainPattern, person_n.domain)
+                if pattern_row is None:
+                    pattern_row = await session.get(DomainPattern, person_n.domain)
                 await process_person(
                     session,
                     record,
@@ -300,6 +305,7 @@ def verify(
                     hunter_client=hunter_client,
                     hunter_budget=hunter_budget,
                     hunter_accept_all=hunter_accept_all,
+                    deduced_pattern=deduced,
                 )
                 await session.commit()
                 result = {
