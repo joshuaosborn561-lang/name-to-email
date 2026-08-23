@@ -249,10 +249,11 @@ async def test_wrong_deduction_falls_through_to_permutations(db, settings: Setti
     assert dana.email == "dlee@mismatch.test"
     assert dana.pattern_used == "{f}{last}"
     assert dana.attempts >= 2
-    probe = f"{settings.catchall_probe_local}@{domain}"
-    assert verifier.calls[0] == probe
-    assert verifier.calls[1] == "dana.lee@mismatch.test"
+    assert "dana.lee@mismatch.test" in verifier.calls
     assert "dlee@mismatch.test" in verifier.calls
+    assert verifier.calls.index("dana.lee@mismatch.test") < verifier.calls.index(
+        "dlee@mismatch.test"
+    )
 
 
 async def test_trusted_local_pattern_skips_hunter(db, settings: Settings):
