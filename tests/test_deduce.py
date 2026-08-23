@@ -5,7 +5,9 @@ from sqlalchemy import select
 from finder.config import Settings
 from finder.engine import create_run, execute_run
 from finder.ingest import IngestedRow
-from finder.models import DomainPattern, Person
+from finder.hunter import HunterPattern
+from finder.hunter_cache import put_local
+from finder.models import DomainPattern, Person, utcnow
 from finder.normalize import normalize_person
 from finder.patterns import record_hit
 from finder.verifiers.mock import MockVerifier
@@ -254,6 +256,88 @@ async def test_wrong_deduction_falls_through_to_permutations(db, settings: Setti
     assert verifier.calls.index("dana.lee@mismatch.test") < verifier.calls.index(
         "dlee@mismatch.test"
     )
+
+
+async def test_our_pattern_cache_is_first_even_when_hunter_cache_exists(
+    db, settings: Settings
+):
+    """domain_patterns is the first lookup. Hunter cache is not consulted."""
+    factory = db
+    domain = "ours.first.test"
+    async with factory() as session:
+        await record_hit(session, domain, "{first}.{last}", trust_threshold=2)
+        await put_local(
+            session,
+            HunterPattern(
+                domain=domain,
+                pattern="{f}{last}",
+                organization="Acme",
+                sighted_emails=[],
+                accept_all=False,
+                webmail=False,
+                hunter_confidence=99,
+                fetched_at=utcnow(),
+                source="hunter",
+            ),
+        )
+        await session.commit()
+
+    hunter = ScriptedHunter(searches={domain: object()})
+    verifier = MockVerifier(valid={"jane.doe@ours.first.test"})
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="lookup",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(factory, run_id, settings, verifier, hunter_client=hunter)
+    assert hunter.domain_calls == []
+    assert hunter.finder_calls == []
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == "jane.doe@ours.first.test"
+    assert person.pattern_used == "{first}.{last}"
+    assert person.pattern_source == "inference"
+    assert person.attempts == 1
+    probe = f"{settings.catchall_probe_local}@{domain}"
+    assert verifier.calls[0] == probe
+    assert verifier.calls[1] == "jane.doe@ours.first.test"
+    assert "jdoe@ours.first.test" not in verifier.calls
+
+
+async def test_preferred_cache_row_skips_hunter(db, settings: Settings):
+    factory = db
+    domain = "preferred.test"
+    async with factory() as session:
+        await record_hit(session, domain, "{f}{last}", trust_threshold=2)
+        await session.commit()
+
+    hunter = ScriptedHunter(searches={domain: object()})
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="lookup",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(
+        factory,
+        run_id,
+        settings,
+        MockVerifier(valid={"jdoe@preferred.test"}),
+        hunter_client=hunter,
+    )
+    assert hunter.domain_calls == []
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == "jdoe@preferred.test"
+    assert person.pattern_used == "{f}{last}"
+    assert person.attempts == 1
 
 
 async def test_trusted_local_pattern_skips_hunter(db, settings: Settings):

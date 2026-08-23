@@ -463,26 +463,27 @@ def build_ranked_candidates(
             )
         )
 
-    if sighted is not None:
-        add(sighted, True, False)
-    if hunter_pattern:
-        for candidate in hunter_pattern_candidates(person, hunter_pattern):
-            add(candidate, False, True)
-
-    hunter_led = bool(hunter_pattern or sighted)
-    if known_pattern and not hunter_led:
+    # Our domain_patterns cache is the first way to find a format.
+    # Hunter sighted addresses and Hunter patterns are fallback only.
+    if known_pattern:
         for candidate in generate_candidates(
             person, patterns, known_pattern=known_pattern, max_candidates=max_candidates
         ):
             add(candidate, False, False)
         return out
 
-    lead = known_pattern or preferred_pattern
+    lead = preferred_pattern
     if lead:
         for candidate in generate_candidates(
             person, patterns, known_pattern=lead, max_candidates=4
         ):
             add(candidate, False, False)
+
+    if sighted is not None:
+        add(sighted, True, False)
+    if hunter_pattern:
+        for candidate in hunter_pattern_candidates(person, hunter_pattern):
+            add(candidate, False, True)
 
     for candidate in generate_candidates(
         person, patterns, known_pattern=None, max_candidates=max_candidates

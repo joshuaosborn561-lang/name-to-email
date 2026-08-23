@@ -12,9 +12,11 @@ from finder.hunter import (
     HunterClient,
     HunterPattern,
     EmailFinderHit,
+    build_ranked_candidates,
     empty_pattern,
     localpart_matches_person,
     match_sighted,
+    sighted_candidate,
 )
 from finder.hunter_cache import put_local, resolve_hunter_pattern
 from finder.ingest import IngestedRow
@@ -579,3 +581,30 @@ def test_sighted_match_requires_first_and_last():
     assert localpart_matches_person("jane.doe@acme.test", person)
     assert match_sighted(person, [{"email": "jdoe@acme.test"}]) is None
     assert match_sighted(person, [{"email": "jane.doe@acme.test"}])["email"] == "jane.doe@acme.test"
+
+
+def test_local_pattern_ranks_ahead_of_hunter():
+    settings = Settings.load()
+    person = normalize_person(
+        "Jane",
+        "Doe",
+        "acme.test",
+        suffixes=settings.suffixes,
+        credentials=settings.credentials,
+        personal_domains=settings.personal_domains,
+    )
+    sighted = sighted_candidate(
+        person, {"email": "jdoe@acme.test"}, settings.patterns
+    )
+    ranked = build_ranked_candidates(
+        person,
+        settings.patterns,
+        hunter_pattern="{f}{last}",
+        sighted=sighted,
+        known_pattern=None,
+        preferred_pattern="{first}.{last}",
+        max_candidates=10,
+    )
+    assert ranked[0].candidate.email == "jane.doe@acme.test"
+    assert ranked[0].from_hunter_pattern is False
+    assert ranked[0].sighted is False

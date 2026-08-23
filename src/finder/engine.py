@@ -580,16 +580,18 @@ async def resolve_domain_strategy(
     hunter_client: HunterAPI | None,
     hunter_budget: HunterBudget | None,
 ) -> tuple[DomainPattern | None, HunterDomainContext, str | None]:
-    """Deduce the company format from known people before any paid lookup.
+    """Find the company format from our cache first.
 
-    Two or three colleagues at the same domain already reveal the pattern.
-    Test that first. Hunter domain search only runs when deduction cannot.
+    1. Look up known people at this domain and write any agreed pattern
+       into domain_patterns.
+    2. Use that local cache as the domain pattern.
+    3. Only if our cache has no pattern, consult Hunter (its own cache,
+       then a paid domain search).
     """
     extras = extra_pairs_from_people(current_people, settings)
     deduced = await deduce_pattern_from_known(
         session, domain, settings, extra_pairs=extras
     )
-    pattern_row = await session.get(DomainPattern, domain)
     if deduced:
         pattern_row = await remember_deduced_pattern(
             session,
@@ -598,17 +600,18 @@ async def resolve_domain_strategy(
             trust_threshold=settings.pattern_trust_threshold,
         )
         logger.info(
-            "Deduced %s for %s from known people, skipping Hunter domain search",
+            "Deduced %s for %s from known people, using domain pattern cache",
             deduced,
             domain,
         )
         return pattern_row, HunterDomainContext(row=None, origin="none"), deduced
 
-    trusted = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
-    if trusted:
+    pattern_row = await session.get(DomainPattern, domain)
+    cached = pattern_row.pattern if pattern_row and pattern_row.pattern else None
+    if cached:
         logger.info(
-            "Trusted pattern %s for %s already on file, skipping Hunter domain search",
-            trusted,
+            "Using cached domain pattern %s for %s, skipping Hunter",
+            cached,
             domain,
         )
         return pattern_row, HunterDomainContext(row=None, origin="none"), None
