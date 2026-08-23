@@ -80,7 +80,7 @@ class HunterDomainContext:
 
 
 class HunterAPI(Protocol):
-    async def domain_search(self, domain: str, limit: int = 10) -> HunterPattern | None: ...
+    async def domain_search(self, domain: str, limit: int = 50) -> HunterPattern | None: ...
 
     async def email_finder(
         self, domain: str, first: str, last: str
@@ -145,6 +145,8 @@ def parse_sighted_emails(emails: Any) -> list[dict[str, Any]]:
         out.append(
             {
                 "email": address,
+                "first_name": str(item.get("first_name") or item.get("first") or "").strip(),
+                "last_name": str(item.get("last_name") or item.get("last") or "").strip(),
                 "confidence": _as_int(item.get("confidence")),
                 "sources_count": sources_count,
             }
@@ -214,7 +216,7 @@ class HunterClient:
         self._client = client
         self.base_url = base_url.rstrip("/")
 
-    async def domain_search(self, domain: str, limit: int = 10) -> HunterPattern | None:
+    async def domain_search(self, domain: str, limit: int = 50) -> HunterPattern | None:
         if not self.api_key or not domain:
             return None
         url = f"{self.base_url}{DOMAIN_SEARCH_PATH}"
@@ -445,6 +447,7 @@ def build_ranked_candidates(
     sighted: Candidate | None,
     known_pattern: str | None,
     preferred_pattern: str | None = None,
+    convention_patterns: list[str] | None = None,
     max_candidates: int,
 ) -> list[RankedCandidate]:
     out: list[RankedCandidate] = []
@@ -464,7 +467,6 @@ def build_ranked_candidates(
         )
 
     # Our domain_patterns cache is the first way to find a format.
-    # Hunter sighted addresses and Hunter patterns are fallback only.
     if known_pattern:
         for candidate in generate_candidates(
             person, patterns, known_pattern=known_pattern, max_candidates=max_candidates
@@ -476,6 +478,14 @@ def build_ranked_candidates(
     if lead:
         for candidate in generate_candidates(
             person, patterns, known_pattern=lead, max_candidates=4
+        ):
+            add(candidate, False, False)
+
+    for template in convention_patterns or []:
+        if not template or template == lead:
+            continue
+        for candidate in generate_candidates(
+            person, patterns, known_pattern=template, max_candidates=4
         ):
             add(candidate, False, False)
 

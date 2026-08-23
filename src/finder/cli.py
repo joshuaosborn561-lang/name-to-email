@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
-from finder.engine import compute_stats, create_run, execute_run, resolve_domain_strategy
+from finder.engine import compute_stats, create_run, execute_run, prepare_domain
 from finder.eval import run_eval
 from finder.export import SEGMENTS, export_segments, write_csv
 from finder.ingest import ingest_csv_path
@@ -226,7 +226,7 @@ def verify(
     """Synchronous single-person lookup (same path as POST /verify)."""
 
     async def _run() -> None:
-        from finder.engine import CostTracker, process_person, probe_catchall
+                from finder.engine import CostTracker, process_person
         from finder.models import Person as PersonModel
 
         settings, engine, factory = await _ready()
@@ -276,21 +276,17 @@ def verify(
                 hunter_client = (
                     HunterClient(settings.hunter_api_key) if settings.hunter_api_key else None
                 )
-                pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+                pattern_row, hunter_ctx, deduced, is_catchall, conventions = await prepare_domain(
                     session,
                     person_n.domain,
                     settings,
                     current_people=[record],
+                    verifier=verifier,
+                    cost=cost,
+                    run_catchall=cache,
                     hunter_client=hunter_client,
                     hunter_budget=hunter_budget,
                 )
-                hunter_accept_all = bool(hunter_ctx.accept_all)
-                if hunter_accept_all:
-                    is_catchall = True
-                else:
-                    is_catchall = await probe_catchall(
-                        session, verifier, person_n.domain, settings, cost, cache
-                    )
                 if pattern_row is None:
                     pattern_row = await session.get(DomainPattern, person_n.domain)
                 await process_person(
@@ -304,8 +300,9 @@ def verify(
                     hunter_ctx=hunter_ctx,
                     hunter_client=hunter_client,
                     hunter_budget=hunter_budget,
-                    hunter_accept_all=hunter_accept_all,
+                    hunter_accept_all=is_catchall and bool(hunter_ctx.accept_all),
                     deduced_pattern=deduced,
+                    convention_patterns=conventions,
                 )
                 await session.commit()
                 result = {

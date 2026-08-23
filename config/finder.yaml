@@ -18,6 +18,10 @@ max_candidates: 10
 # Trust a stored domain pattern after this many consistent confirmations.
 pattern_trust_threshold: 2
 
+# Once this many people at a domain share one format, that is the convention.
+# If several formats reach this bar, try those formats.
+convention_majority: 3
+
 catchall:
   # Deliberately fake local-part used to probe whether a domain accepts all mail.
   probe_local: "zzq-nope-9f3a2b"

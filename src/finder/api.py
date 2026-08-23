@@ -23,9 +23,8 @@ from finder.engine import (
     compute_stats,
     create_run,
     execute_run,
+    prepare_domain,
     process_person,
-    probe_catchall,
-    resolve_domain_strategy,
 )
 from finder.hunter import HunterBudget
 from finder.export import SEGMENTS, segment_for, write_csv
@@ -269,21 +268,17 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             from finder.hunter import HunterClient
 
             hunter_client = HunterClient(settings.hunter_api_key)
-        pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+        pattern_row, hunter_ctx, deduced, is_catchall, conventions = await prepare_domain(
             session,
             person_n.domain,
             settings,
             current_people=[record],
+            verifier=verifier,
+            cost=cost,
+            run_catchall=cache,
             hunter_client=hunter_client,
             hunter_budget=hunter_budget,
         )
-        hunter_accept_all = bool(hunter_ctx.accept_all)
-        if hunter_accept_all:
-            is_catchall = True
-        else:
-            is_catchall = await probe_catchall(
-                session, verifier, person_n.domain, settings, cost, cache
-            )
         if pattern_row is None:
             pattern_row = await session.get(DomainPattern, person_n.domain)
         await process_person(
@@ -297,8 +292,9 @@ async def verify_one(body: VerifyRequest) -> dict[str, Any]:
             hunter_ctx=hunter_ctx,
             hunter_client=hunter_client,
             hunter_budget=hunter_budget,
-            hunter_accept_all=hunter_accept_all,
+            hunter_accept_all=is_catchall and bool(hunter_ctx.accept_all),
             deduced_pattern=deduced,
+            convention_patterns=conventions,
         )
         await session.commit()
         return {

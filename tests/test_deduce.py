@@ -60,10 +60,12 @@ async def test_known_colleagues_skip_hunter_and_try_deduced_first(db, settings: 
     first_people = [
         _row("Alice", "Anderson", domain, settings),
         _row("Brian", "Baker", domain, settings),
+        _row("Dana", "Lee", domain, settings),
     ]
     valid = {
         "alice.anderson@colleagues.test",
         "brian.baker@colleagues.test",
+        "dana.lee@colleagues.test",
         "cara.cole@colleagues.test",
     }
     async with factory() as session:
@@ -176,11 +178,13 @@ async def test_source_emails_in_same_batch_deduce_without_hunter(db, settings: S
     people = [
         _row("Alice", "Anderson", domain, settings, source_email="alice.anderson@batch.test"),
         _row("Brian", "Baker", domain, settings, source_email="brian.baker@batch.test"),
+        _row("Dana", "Lee", domain, settings, source_email="dana.lee@batch.test"),
         _row("Cara", "Cole", domain, settings),
     ]
     valid = {
         "alice.anderson@batch.test",
         "brian.baker@batch.test",
+        "dana.lee@batch.test",
         "cara.cole@batch.test",
     }
     hunter = ScriptedHunter(searches={domain: object()})
@@ -208,6 +212,7 @@ async def test_wrong_deduction_falls_through_to_permutations(db, settings: Setti
     first_people = [
         _row("Alice", "Anderson", domain, settings),
         _row("Brian", "Baker", domain, settings),
+        _row("Cara", "Cole", domain, settings),
     ]
     async with factory() as session:
         run = await create_run(
@@ -222,6 +227,7 @@ async def test_wrong_deduction_falls_through_to_permutations(db, settings: Setti
             valid={
                 "alice.anderson@mismatch.test",
                 "brian.baker@mismatch.test",
+                "cara.cole@mismatch.test",
             }
         ),
     )

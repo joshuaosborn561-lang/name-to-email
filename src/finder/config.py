@@ -73,6 +73,10 @@ class Settings(BaseSettings):
         return int(self.yaml_data.get("pattern_trust_threshold", 2))
 
     @property
+    def convention_majority(self) -> int:
+        return int(self.yaml_data.get("convention_majority", 3))
+
+    @property
     def catchall_probe_local(self) -> str:
         return str(self.yaml_data.get("catchall", {}).get("probe_local", "zzq-nope-9f3a2b"))
 

@@ -251,7 +251,7 @@ async def resolve_hunter_pattern(
         return HunterDomainContext(row=None, origin="none")
 
     try:
-        fetched = await client.domain_search(domain, limit=10)
+        fetched = await client.domain_search(domain, limit=50)
     except Exception:
         logger.info(
             "Hunter call endpoint=domain-search domain=%s result=error used=%s cap=%s",

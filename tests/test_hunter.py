@@ -215,16 +215,12 @@ async def test_engine_accept_all_skips_smtp(db, settings: Settings):
         )
         run_id = run.id
     await execute_run(factory, run_id, settings, verifier, hunter_client=hunter)
-    assert verifier.calls == []
     async with factory() as session:
         person = (await session.execute(select(Person))).scalars().first()
-    assert person.status == "catchall_pattern"
-    assert person.email == "jane.doe@wide.test"
-    assert person.attempts == 0
+    assert person.status == "not_found"
+    assert person.email is None
     assert person.domain_is_catchall is True
-    assert person.pattern_source == "hunter"
-    assert person.hunter_confidence == 70
-    assert segment_for(person) == "catchall"
+    assert segment_for(person) == "unresolved"
 
 
 async def test_engine_empty_result_stores_and_uses_inference(db, settings: Settings):
@@ -502,7 +498,8 @@ async def test_export_includes_hunter_columns(db, settings: Settings):
     assert "pattern_source" in csv_text
     assert "sighted" in csv_text
     assert "hunter_confidence" in csv_text
-    assert "catchall_pattern" in csv_text
+    assert "domain_is_catchall" in csv_text
+    assert person.status == "not_found"
 
 
 async def test_stale_cache_refetches(db, settings: Settings):
@@ -608,3 +605,150 @@ def test_local_pattern_ranks_ahead_of_hunter():
     assert ranked[0].candidate.email == "jane.doe@acme.test"
     assert ranked[0].from_hunter_pattern is False
     assert ranked[0].sighted is False
+
+
+def _found(first: str, last: str, email: str, confidence: int = 90) -> dict:
+    return {
+        "email": email,
+        "first_name": first,
+        "last_name": last,
+        "confidence": confidence,
+        "sources_count": 2,
+    }
+
+
+async def test_three_found_people_set_the_convention(db, settings: Settings):
+    factory = db
+    domain = "found.test"
+    hunter = ScriptedHunter(
+        searches={
+            domain: _pattern(
+                domain,
+                pattern=None,
+                sighted=[
+                    _found("Alice", "Anderson", f"alice.anderson@{domain}"),
+                    _found("Brian", "Baker", f"brian.baker@{domain}"),
+                    _found("Cara", "Cole", f"cara.cole@{domain}"),
+                ],
+            )
+        }
+    )
+    verifier = MockVerifier(valid={f"jane.doe@{domain}"})
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="test",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(factory, run_id, settings, verifier, hunter_client=hunter)
+    assert hunter.domain_calls == [domain]
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == f"jane.doe@{domain}"
+    assert person.pattern_used == "{first}.{last}"
+    probe = f"{settings.catchall_probe_local}@{domain}"
+    assert verifier.calls[0] == probe
+    assert verifier.calls[1] == f"jane.doe@{domain}"
+
+
+async def test_mixed_conventions_are_tried_in_order(db, settings: Settings):
+    factory = db
+    domain = "mixed.test"
+    hunter = ScriptedHunter(
+        searches={
+            domain: _pattern(
+                domain,
+                pattern=None,
+                sighted=[
+                    _found("Alice", "Anderson", f"alice.anderson@{domain}"),
+                    _found("Brian", "Baker", f"brian.baker@{domain}"),
+                    _found("Cara", "Cole", f"cara.cole@{domain}"),
+                    _found("Dana", "Lee", f"dlee@{domain}"),
+                    _found("Evan", "Ng", f"eng@{domain}"),
+                    _found("Fay", "Ortiz", f"fortiz@{domain}"),
+                ],
+            )
+        }
+    )
+    verifier = MockVerifier(valid={f"jdoe@{domain}"})
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="test",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(factory, run_id, settings, verifier, hunter_client=hunter)
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == f"jdoe@{domain}"
+    assert person.pattern_used == "{f}{last}"
+    assert verifier.calls[1] == f"jane.doe@{domain}"
+    assert verifier.calls[2] == f"jdoe@{domain}"
+
+
+async def test_catchall_sighted_person_is_valid(db, settings: Settings):
+    factory = db
+    domain = "realwide.test"
+    hunter = ScriptedHunter(
+        searches={
+            domain: _pattern(
+                domain,
+                accept_all=True,
+                sighted=[_found("Jane", "Doe", f"jane.doe@{domain}", 95)],
+            )
+        }
+    )
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="test",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(factory, run_id, settings, MockVerifier(), hunter_client=hunter)
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == f"jane.doe@{domain}"
+    assert person.sighted is True
+    assert person.domain_is_catchall is True
+    assert person.confidence == "high"
+    assert segment_for(person) == "valid"
+
+
+async def test_catchall_finder_confirms_mailbox(db, settings: Settings):
+    factory = db
+    domain = "findwide.test"
+    hunter = ScriptedHunter(
+        searches={domain: _pattern(domain, accept_all=True, sighted=[])},
+        finders={
+            (domain, "jane", "doe"): EmailFinderHit(
+                email=f"jane.special@{domain}", score=82, accept_all=True
+            )
+        },
+    )
+    async with factory() as session:
+        run = await create_run(
+            session,
+            [_row("Jane", "Doe", domain, settings)],
+            source="test",
+            cost_ceiling=Decimal("10"),
+        )
+        run_id = run.id
+    await execute_run(factory, run_id, settings, MockVerifier(), hunter_client=hunter)
+    assert hunter.finder_calls
+    async with factory() as session:
+        person = (await session.execute(select(Person))).scalars().first()
+    assert person.status == "valid"
+    assert person.email == f"jane.special@{domain}"
+    assert person.domain_is_catchall is True
+    assert person.pattern_source == "hunter"
+    assert person.hunter_confidence == 82
+    assert segment_for(person) == "valid"

@@ -166,17 +166,11 @@ def extra_pairs_from_people(
     return pairs
 
 
-def agreeing_pattern(
+def convention_votes(
     pairs: Iterable[tuple[NormalizedPerson, str]],
     patterns: list[str],
-    *,
-    min_agree: int = 2,
-) -> str | None:
-    """Return the template shared by at least min_agree distinct known people.
-
-    One person is not enough: a single address can be an alias. Two or three
-    colleagues at the same domain is enough to read the company format.
-    """
+) -> Counter[str]:
+    """Count distinct people per email format."""
     votes: Counter[str] = Counter()
     seen_emails: set[str] = set()
     seen_names: set[tuple[str, str]] = set()
@@ -196,6 +190,36 @@ def agreeing_pattern(
         if name_key != ("", ""):
             seen_names.add(name_key)
         votes[template] += 1
+    return votes
+
+
+def conventions_to_try(votes: Counter[str], majority: int = 3) -> list[str]:
+    """Pick formats to test from people found at the domain.
+
+    Three people on one format is enough to treat that as the convention.
+    If several formats show up, try those too.
+    """
+    if not votes:
+        return []
+    ranked = votes.most_common()
+    strong = [pattern for pattern, count in ranked if count >= majority]
+    if len(strong) == 1:
+        extras = [pattern for pattern, count in ranked if pattern != strong[0] and count >= 2]
+        return strong + extras
+    if strong:
+        extras = [pattern for pattern, count in ranked if pattern not in strong and count >= 2]
+        return strong + extras
+    return [pattern for pattern, _count in ranked]
+
+
+def agreeing_pattern(
+    pairs: Iterable[tuple[NormalizedPerson, str]],
+    patterns: list[str],
+    *,
+    min_agree: int = 3,
+) -> str | None:
+    """Return the template shared by at least min_agree distinct known people."""
+    votes = convention_votes(pairs, patterns)
     if not votes:
         return None
     winner, count = votes.most_common(1)[0]
@@ -204,6 +228,33 @@ def agreeing_pattern(
     if sum(1 for value in votes.values() if value == count) > 1:
         return None
     return winner
+
+
+def pairs_from_sighted(
+    sighted: Iterable[dict],
+    domain: str,
+    settings: Settings,
+) -> list[tuple[NormalizedPerson, str]]:
+    """Turn anyone found at the domain into name + email pairs."""
+    pairs: list[tuple[NormalizedPerson, str]] = []
+    for item in sighted:
+        email = str(item.get("email") or "").strip().lower()
+        first = str(item.get("first_name") or item.get("first") or "").strip()
+        last = str(item.get("last_name") or item.get("last") or "").strip()
+        if not email or "@" not in email or not first or not last:
+            continue
+        person = normalize_person(
+            first,
+            last,
+            domain,
+            suffixes=settings.suffixes,
+            credentials=settings.credentials,
+            personal_domains=settings.personal_domains,
+        )
+        if person.insufficient_name:
+            continue
+        pairs.append((person, email))
+    return pairs
 
 
 async def load_known_pairs_at_domain(
@@ -249,7 +300,7 @@ async def deduce_pattern_from_known(
     pairs = await load_known_pairs_at_domain(
         session, domain, settings, extra_pairs=extra_pairs
     )
-    threshold = settings.pattern_trust_threshold if min_agree is None else min_agree
+    threshold = settings.convention_majority if min_agree is None else min_agree
     return agreeing_pattern(pairs, settings.patterns, min_agree=threshold)
 
 

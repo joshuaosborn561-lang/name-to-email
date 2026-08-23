@@ -1,6 +1,6 @@
 from finder.config import Settings
 from finder.normalize import normalize_person
-from finder.patterns import agreeing_pattern
+from finder.patterns import agreeing_pattern, convention_votes, conventions_to_try
 
 
 def _person(first: str, last: str, domain: str = "acme.test"):
@@ -58,3 +58,32 @@ def test_majority_wins_when_three_known():
         (_person("Cara", "Cole"), "ccole@acme.test"),
     ]
     assert agreeing_pattern(pairs, settings.patterns, min_agree=2) == "{first}.{last}"
+
+
+def test_three_matching_people_is_the_convention():
+    settings = Settings.load()
+    pairs = [
+        (_person("Alice", "Anderson"), "alice.anderson@acme.test"),
+        (_person("Brian", "Baker"), "brian.baker@acme.test"),
+        (_person("Cara", "Cole"), "cara.cole@acme.test"),
+    ]
+    assert agreeing_pattern(pairs, settings.patterns) == "{first}.{last}"
+    assert conventions_to_try(convention_votes(pairs, settings.patterns), 3) == [
+        "{first}.{last}"
+    ]
+
+
+def test_several_conventions_are_all_tried():
+    settings = Settings.load()
+    pairs = [
+        (_person("Alice", "Anderson"), "alice.anderson@acme.test"),
+        (_person("Brian", "Baker"), "brian.baker@acme.test"),
+        (_person("Cara", "Cole"), "cara.cole@acme.test"),
+        (_person("Dana", "Lee"), "dlee@acme.test"),
+        (_person("Evan", "Ng"), "eng@acme.test"),
+        (_person("Fay", "Ortiz"), "fortiz@acme.test"),
+    ]
+    assert conventions_to_try(convention_votes(pairs, settings.patterns), 3) == [
+        "{first}.{last}",
+        "{f}{last}",
+    ]

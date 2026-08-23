@@ -29,14 +29,16 @@ from finder.models import DomainPattern, Person, Run, Verification, utcnow
 from finder.normalize import NormalizedPerson
 from finder.patterns import (
     catchall_is_cached,
+    convention_votes,
+    conventions_to_try,
     deduce_pattern_from_known,
     extra_pairs_from_people,
+    pairs_from_sighted,
     record_hit,
     remember_deduced_pattern,
     trusted_pattern,
     upsert_catchall,
 )
-from finder.permute import generate_candidates
 from finder.verifiers.base import Verdict, Verifier
 
 logger = logging.getLogger(__name__)
@@ -82,9 +84,19 @@ class CostTracker:
         return self.spent
 
 
-def _confidence(status: str, domain_is_catchall: bool, pattern_derived: bool) -> str:
+def _confidence(
+    status: str,
+    domain_is_catchall: bool,
+    pattern_derived: bool,
+    *,
+    sighted: bool = False,
+) -> str:
+    if status == "valid" and sighted:
+        return "high"
     if status == "valid" and not domain_is_catchall:
         return "high"
+    if status == "valid":
+        return "medium"
     if status in {"catchall", "catchall_pattern"} and pattern_derived:
         return "medium"
     return "low"
@@ -184,7 +196,9 @@ async def _apply_result(
     person.attempts = attempts
     person.verifier = verifier
     person.domain_is_catchall = domain_is_catchall
-    person.confidence = _confidence(status, domain_is_catchall, pattern_derived)
+    person.confidence = _confidence(
+        status, domain_is_catchall, pattern_derived, sighted=sighted
+    )
     person.error_message = error_message
     person.pattern_source = pattern_source
     person.sighted = sighted
@@ -239,6 +253,7 @@ def _rank_person_candidates(
     settings: Settings,
     pattern_row: DomainPattern | None,
     hunter_ctx: HunterDomainContext | None,
+    convention_patterns: list[str] | None = None,
 ) -> list[RankedCandidate]:
     known = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
     preferred = pattern_row.pattern if pattern_row and pattern_row.pattern else None
@@ -255,6 +270,7 @@ def _rank_person_candidates(
         sighted=sighted,
         known_pattern=known,
         preferred_pattern=preferred,
+        convention_patterns=convention_patterns,
         max_candidates=settings.max_candidates,
     )
 
@@ -272,6 +288,7 @@ async def process_person(
     hunter_budget: HunterBudget | None = None,
     hunter_accept_all: bool = False,
     deduced_pattern: str | None = None,
+    convention_patterns: list[str] | None = None,
 ) -> DomainPattern | None:
     if person.status in TERMINAL:
         return pattern_row
@@ -281,63 +298,24 @@ async def process_person(
 
     normalized = _normalized_from_person(person)
     known = trusted_pattern(pattern_row, settings.pattern_trust_threshold)
-    preferred = pattern_row.pattern if pattern_row and pattern_row.pattern else None
-    emit_pattern = known or preferred
-    ranked_list = _rank_person_candidates(normalized, settings, pattern_row, hunter_ctx)
+    ranked_list = _rank_person_candidates(
+        normalized, settings, pattern_row, hunter_ctx, convention_patterns
+    )
 
-    if hunter_accept_all:
-        ranked = ranked_list[0] if ranked_list else None
-        email = ranked.candidate.email if ranked else None
-        pattern = ranked.candidate.pattern if ranked else (hunter_ctx.pattern if hunter_ctx else emit_pattern)
-        source, sighted_flag, hconf = _source_meta(ranked, hunter_ctx, deduced_pattern)
-        if source == "inference" and hunter_ctx and hunter_ctx.row is not None:
-            source = hunter_ctx.pattern_source_label
-            hconf = hunter_ctx.hunter_confidence
-        await _apply_result(
+    if domain_catchall or hunter_accept_all:
+        return await _confirm_on_catchall(
             session,
             person,
-            status="catchall_pattern",
-            email=email,
-            pattern=pattern,
-            attempts=0,
-            verifier=None,
-            domain_is_catchall=True,
-            pattern_derived=bool(pattern),
-            pattern_source=source,
-            sighted=sighted_flag,
-            hunter_confidence=hconf,
-        )
-        return pattern_row
-
-    if domain_catchall:
-        candidates = generate_candidates(
             normalized,
-            settings.patterns,
-            known_pattern=emit_pattern or settings.patterns[0],
-            max_candidates=1,
-        )
-        candidate = candidates[0] if candidates else None
-        email = candidate.email if candidate else None
-        pattern = candidate.pattern if candidate else (emit_pattern or settings.patterns[0])
-        await _apply_result(
-            session,
-            person,
-            status="catchall",
-            email=email,
-            pattern=pattern,
+            settings,
+            pattern_row,
+            hunter_ctx,
+            hunter_client,
+            hunter_budget,
+            deduced_pattern,
+            convention_patterns,
             attempts=0,
-            verifier=None,
-            domain_is_catchall=True,
-            pattern_derived=bool(emit_pattern and emit_pattern == pattern and pattern_row and pattern_row.sample_count),
-            pattern_source=(
-                "known"
-                if deduced_pattern and pattern == deduced_pattern
-                else "inference"
-            ),
-            sighted=False,
-            hunter_confidence=None,
         )
-        return pattern_row
 
     attempts = 0
     for ranked in ranked_list:
@@ -376,22 +354,19 @@ async def process_person(
 
         if verdict.status == "catchall":
             await upsert_catchall(session, person.norm_domain, True)
-            await _apply_result(
+            return await _confirm_on_catchall(
                 session,
                 person,
-                status="catchall",
-                email=candidate.email,
-                pattern=candidate.pattern,
+                normalized,
+                settings,
+                pattern_row,
+                hunter_ctx,
+                hunter_client,
+                hunter_budget,
+                deduced_pattern,
+                convention_patterns,
                 attempts=attempts,
-                verifier=verdict.verifier,
-                domain_is_catchall=True,
-                pattern_derived=bool(known) or ranked.from_hunter_pattern,
-                pattern_source=source,
-                sighted=sighted_flag,
-                hunter_confidence=hconf,
             )
-            pattern_row = await session.get(DomainPattern, person.norm_domain)
-            return pattern_row
 
         if verdict.status == "error":
             await _apply_result(
@@ -442,19 +417,123 @@ async def process_person(
     return pattern_row
 
 
+async def _confirm_on_catchall(
+    session: AsyncSession,
+    person: Person,
+    normalized: NormalizedPerson,
+    settings: Settings,
+    pattern_row: DomainPattern | None,
+    hunter_ctx: HunterDomainContext | None,
+    hunter_client: HunterAPI | None,
+    hunter_budget: HunterBudget | None,
+    deduced_pattern: str | None,
+    convention_patterns: list[str] | None,
+    attempts: int,
+) -> DomainPattern | None:
+    """SMTP accept-all proves nothing. Confirm from people found at the domain."""
+    if hunter_ctx is None or hunter_ctx.row is None:
+        if hunter_client is not None:
+            hunter_ctx = await resolve_hunter_pattern(
+                session, person.norm_domain, settings, hunter_client, hunter_budget
+            )
+
+    sighted_list = hunter_ctx.sighted_emails if hunter_ctx else []
+    matched = match_sighted(normalized, sighted_list) if sighted_list else None
+    if matched is not None:
+        ranked = sighted_candidate(normalized, matched, settings.patterns)
+        source, sighted_flag, hconf = _source_meta(
+            RankedCandidate(candidate=ranked, sighted=True, from_hunter_pattern=False),
+            hunter_ctx,
+            deduced_pattern,
+        )
+        await _apply_result(
+            session,
+            person,
+            status="valid",
+            email=ranked.email,
+            pattern=ranked.pattern,
+            attempts=attempts,
+            verifier=None,
+            domain_is_catchall=True,
+            pattern_derived=bool(ranked.pattern and ranked.pattern != "sighted"),
+            pattern_source=source if source != "inference" else (hunter_ctx.pattern_source_label if hunter_ctx else "known"),
+            sighted=True,
+            hunter_confidence=hconf,
+        )
+        return pattern_row
+
+    ranked_list = _rank_person_candidates(
+        normalized, settings, pattern_row, hunter_ctx, convention_patterns
+    )
+    seen = {str(item.get("email") or "").lower() for item in sighted_list}
+    for ranked in ranked_list:
+        if ranked.candidate.email.lower() in seen:
+            source, _sighted_flag, hconf = _source_meta(ranked, hunter_ctx, deduced_pattern)
+            await _apply_result(
+                session,
+                person,
+                status="valid",
+                email=ranked.candidate.email,
+                pattern=ranked.candidate.pattern,
+                attempts=attempts,
+                verifier=None,
+                domain_is_catchall=True,
+                pattern_derived=True,
+                pattern_source=source if source != "inference" else "known",
+                sighted=True,
+                hunter_confidence=hconf,
+            )
+            return pattern_row
+
+    if await _try_email_finder(
+        session,
+        person,
+        normalized,
+        verifier=None,
+        settings=settings,
+        cost=CostTracker(None),
+        hunter_ctx=hunter_ctx,
+        hunter_client=hunter_client,
+        hunter_budget=hunter_budget,
+        attempts=attempts,
+        allow_with_pattern=True,
+        confirm_as_valid=True,
+    ):
+        return pattern_row
+
+    await _apply_result(
+        session,
+        person,
+        status="not_found",
+        email=None,
+        pattern=None,
+        attempts=attempts,
+        verifier=None,
+        domain_is_catchall=True,
+        pattern_derived=False,
+        pattern_source="inference",
+        sighted=False,
+        hunter_confidence=None,
+    )
+    return pattern_row
+
+
 async def _try_email_finder(
     session: AsyncSession,
     person: Person,
     normalized: NormalizedPerson,
-    verifier: Verifier,
+    verifier: Verifier | None,
     settings: Settings,
     cost: CostTracker,
     hunter_ctx: HunterDomainContext | None,
     hunter_client: HunterAPI | None,
     hunter_budget: HunterBudget | None,
     attempts: int,
+    *,
+    allow_with_pattern: bool = False,
+    confirm_as_valid: bool = False,
 ) -> bool:
-    if hunter_ctx is not None and hunter_ctx.pattern:
+    if hunter_ctx is not None and hunter_ctx.pattern and not allow_with_pattern:
         return False
     if hunter_client is None or hunter_budget is None:
         return False
@@ -490,11 +569,11 @@ async def _try_email_finder(
         return False
 
     source = "hunter"
-    if hit.accept_all:
+    if confirm_as_valid or hit.accept_all:
         await _apply_result(
             session,
             person,
-            status="catchall_pattern",
+            status="valid",
             email=hit.email,
             pattern=None,
             attempts=attempts,
@@ -506,6 +585,9 @@ async def _try_email_finder(
             hunter_confidence=hit.score,
         )
         return True
+
+    if verifier is None:
+        return False
 
     try:
         verdict = await verify_email(session, verifier, hit.email, cost)
@@ -533,11 +615,11 @@ async def _try_email_finder(
         await _apply_result(
             session,
             person,
-            status="catchall",
+            status="valid",
             email=hit.email,
             pattern=None,
             attempts=attempts,
-            verifier=verdict.verifier,
+            verifier=None,
             domain_is_catchall=True,
             pattern_derived=False,
             pattern_source=source,
@@ -571,23 +653,33 @@ def _name_variants_from_passthrough(person: Person, which: str) -> list[str]:
     return []
 
 
-async def resolve_domain_strategy(
+def _conventions_from_found(
+    hunter_ctx: HunterDomainContext | None,
+    domain: str,
+    settings: Settings,
+) -> list[str]:
+    if hunter_ctx is None or not hunter_ctx.sighted_emails:
+        return []
+    pairs = pairs_from_sighted(hunter_ctx.sighted_emails, domain, settings)
+    votes = convention_votes(pairs, settings.patterns)
+    chosen = conventions_to_try(votes, settings.convention_majority)
+    if chosen:
+        logger.info(
+            "Naming conventions at %s from %s found people: %s",
+            domain,
+            sum(votes.values()),
+            ", ".join(f"{name} x{votes[name]}" for name in chosen),
+        )
+    return chosen
+
+
+async def load_local_domain_pattern(
     session: AsyncSession,
     domain: str,
     settings: Settings,
     *,
     current_people: list[Person],
-    hunter_client: HunterAPI | None,
-    hunter_budget: HunterBudget | None,
-) -> tuple[DomainPattern | None, HunterDomainContext, str | None]:
-    """Find the company format from our cache first.
-
-    1. Look up known people at this domain and write any agreed pattern
-       into domain_patterns.
-    2. Use that local cache as the domain pattern.
-    3. Only if our cache has no pattern, consult Hunter (its own cache,
-       then a paid domain search).
-    """
+) -> tuple[DomainPattern | None, str | None]:
     extras = extra_pairs_from_people(current_people, settings)
     deduced = await deduce_pattern_from_known(
         session, domain, settings, extra_pairs=extras
@@ -604,23 +696,68 @@ async def resolve_domain_strategy(
             deduced,
             domain,
         )
-        return pattern_row, HunterDomainContext(row=None, origin="none"), deduced
-
+        return pattern_row, deduced
     pattern_row = await session.get(DomainPattern, domain)
-    cached = pattern_row.pattern if pattern_row and pattern_row.pattern else None
-    if cached:
+    if pattern_row and pattern_row.pattern:
         logger.info(
-            "Using cached domain pattern %s for %s, skipping Hunter",
-            cached,
+            "Using cached domain pattern %s for %s",
+            pattern_row.pattern,
             domain,
         )
-        return pattern_row, HunterDomainContext(row=None, origin="none"), None
+    return pattern_row, None
 
-    hunter_ctx = await resolve_hunter_pattern(
-        session, domain, settings, hunter_client, hunter_budget
+
+async def prepare_domain(
+    session: AsyncSession,
+    domain: str,
+    settings: Settings,
+    *,
+    current_people: list[Person],
+    verifier: Verifier,
+    cost: CostTracker,
+    run_catchall: dict[str, bool],
+    hunter_client: HunterAPI | None,
+    hunter_budget: HunterBudget | None,
+) -> tuple[DomainPattern | None, HunterDomainContext, str | None, bool, list[str]]:
+    """Cache first. If we are still finding, find anyone at the domain.
+
+    People found there reveal the naming convention. Three on the same
+    format is enough. Several formats means we try those formats.
+    Catchall SMTP is ignored until an address is confirmed in sources.
+    """
+    pattern_row, deduced = await load_local_domain_pattern(
+        session, domain, settings, current_people=current_people
     )
-    pattern_row = await session.get(DomainPattern, domain)
-    return pattern_row, hunter_ctx, None
+    cached = bool(deduced or (pattern_row and pattern_row.pattern))
+
+    is_catchall = bool(run_catchall.get(domain))
+    if not is_catchall:
+        is_catchall = await probe_catchall(
+            session, verifier, domain, settings, cost, run_catchall
+        )
+
+    hunter_ctx = HunterDomainContext(row=None, origin="none")
+    still_finding = (not cached) or is_catchall
+    if still_finding:
+        hunter_ctx = await resolve_hunter_pattern(
+            session, domain, settings, hunter_client, hunter_budget
+        )
+        if hunter_ctx.accept_all:
+            is_catchall = True
+            run_catchall[domain] = True
+
+    conventions = _conventions_from_found(hunter_ctx, domain, settings)
+    if conventions and not deduced:
+        pattern_row = await remember_deduced_pattern(
+            session,
+            domain,
+            conventions[0],
+            trust_threshold=settings.pattern_trust_threshold,
+        )
+        if len(conventions) == 1:
+            deduced = conventions[0]
+
+    return pattern_row, hunter_ctx, deduced, is_catchall, conventions
 
 
 async def process_domain(
@@ -646,23 +783,18 @@ async def process_domain(
                 await session.commit()
                 return
 
-            pattern_row, hunter_ctx, deduced = await resolve_domain_strategy(
+            pattern_row, hunter_ctx, deduced, is_catchall, conventions = await prepare_domain(
                 session,
                 domain,
                 settings,
                 current_people=people,
+                verifier=verifier,
+                cost=cost,
+                run_catchall=run_catchall,
                 hunter_client=hunter_client,
                 hunter_budget=hunter_budget,
             )
             await _persist_hunter_calls(session, run_id, hunter_budget)
-            hunter_accept_all = bool(hunter_ctx.accept_all)
-            if hunter_accept_all:
-                is_catchall = True
-                run_catchall[domain] = True
-            else:
-                is_catchall = await probe_catchall(
-                    session, verifier, domain, settings, cost, run_catchall
-                )
             if pattern_row is None:
                 pattern_row = await session.get(DomainPattern, domain)
 
@@ -680,8 +812,9 @@ async def process_domain(
                     hunter_ctx=hunter_ctx,
                     hunter_client=hunter_client,
                     hunter_budget=hunter_budget,
-                    hunter_accept_all=hunter_accept_all,
+                    hunter_accept_all=is_catchall and bool(hunter_ctx.accept_all),
                     deduced_pattern=deduced,
+                    convention_patterns=conventions,
                 )
                 if pattern_row and pattern_row.is_catchall:
                     is_catchall = True

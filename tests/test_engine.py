@@ -47,11 +47,12 @@ async def test_catchall_skips_permutations(db, settings: Settings):
     await execute_run(factory, run_id, settings, verifier)
     async with factory() as session:
         person = (await session.execute(select(Person))).scalars().first()
-        assert person.status == "catchall"
-        assert person.email == "jane.doe@acceptall.test"
+        assert person.status == "not_found"
+        assert person.email is None
+        assert person.domain_is_catchall is True
         assert person.attempts == 0
         assert person.confidence == "low"
-    # Probe of fake address only; no permutation verifies.
+    # Probe of fake address only. A guess is not treated as a real mailbox.
     probe = f"{settings.catchall_probe_local}@acceptall.test"
     assert verifier.calls == [probe]
 
