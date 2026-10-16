@@ -39,6 +39,7 @@ from finder.patterns import (
     trusted_pattern,
     upsert_catchall,
 )
+from finder.limits import configure_from_settings
 from finder.verifiers.base import Verdict, Verifier
 
 logger = logging.getLogger(__name__)
@@ -934,7 +935,13 @@ def _hunter_client(settings: Settings, hunter_client: HunterAPI | None) -> Hunte
         return None
     from finder.hunter import HunterClient
 
-    return HunterClient(settings.hunter_api_key)
+    rl = settings.yaml_data.get("rate_limit", {}) if settings.yaml_data else {}
+    return HunterClient(
+        settings.hunter_api_key,
+        max_retries=int(rl.get("max_retries", 5)),
+        base_delay=float(rl.get("base_delay_seconds", 0.5)),
+        max_delay=float(rl.get("max_delay_seconds", 30)),
+    )
 
 
 async def execute_run(
@@ -975,7 +982,8 @@ async def execute_run(
     run_catchall: dict[str, bool] = {}
     hunter_budget = HunterBudget(max_calls=settings.max_hunter_calls)
     active_hunter = _hunter_client(settings, hunter_client)
-    sem = asyncio.Semaphore(max(1, settings.max_concurrency))
+    configure_from_settings(settings)
+    sem = asyncio.Semaphore(settings.max_concurrency)
 
     async def _one(domain: str, ids: list[uuid.UUID]) -> None:
         if not domain:

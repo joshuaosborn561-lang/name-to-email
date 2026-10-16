@@ -18,13 +18,23 @@ from finder.models import Base
 
 logger = logging.getLogger(__name__)
 
+# Shared Postgres (including Supabase) often caps around 60 connections across
+# every service. Keep this process tiny: 5 checked-out connections, no overflow.
+DB_POOL_SIZE = 5
+DB_MAX_OVERFLOW = 0
+
 
 def create_engine(database_url: str) -> AsyncEngine:
-    kwargs: dict = {"pool_pre_ping": True}
     if database_url.startswith("sqlite"):
-        kwargs = {
+        kwargs: dict = {
             "connect_args": {"check_same_thread": False},
             "poolclass": StaticPool,
+        }
+    else:
+        kwargs = {
+            "pool_size": DB_POOL_SIZE,
+            "max_overflow": DB_MAX_OVERFLOW,
+            "pool_pre_ping": True,
         }
     return create_async_engine(database_url, **kwargs)
 

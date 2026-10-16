@@ -4,8 +4,17 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from finder.limits import (
+    CONCURRENCY_CAP,
+    DEFAULT_HUNTER_CONCURRENCY,
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_VERIFIER_CONCURRENCY,
+    clamp_concurrency,
+    configure_from_settings,
+)
 
 
 def _default_config_path() -> Path:
@@ -46,7 +55,9 @@ class Settings(BaseSettings):
     hunter_api_key: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""
-    max_concurrency: int = 5
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    verifier_max_concurrency: int = DEFAULT_VERIFIER_CONCURRENCY
+    hunter_max_concurrency: int = DEFAULT_HUNTER_CONCURRENCY
     default_cost_ceiling: float = 25.0
     max_hunter_calls: int = 200
     hunter_cache_ttl_days: int = 180
@@ -54,10 +65,21 @@ class Settings(BaseSettings):
 
     yaml_data: dict[str, Any] = Field(default_factory=dict, exclude=True)
 
+    @field_validator(
+        "max_concurrency",
+        "verifier_max_concurrency",
+        "hunter_max_concurrency",
+        mode="after",
+    )
+    @classmethod
+    def _cap_concurrency(cls, value: int) -> int:
+        return clamp_concurrency(value, default=1, cap=CONCURRENCY_CAP)
+
     @classmethod
     def load(cls, config_path: Path | None = None) -> "Settings":
         settings = cls()
         settings.yaml_data = load_yaml_config(config_path or settings.finder_config)
+        configure_from_settings(settings)
         return settings
 
     @property
