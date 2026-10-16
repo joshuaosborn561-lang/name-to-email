@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from finder.limits import VENDOR_HUNTER, request_with_backoff
 from finder.models import utcnow
 from finder.normalize import NormalizedPerson
 from finder.permute import Candidate, apply_pattern, generate_candidates, infer_pattern
@@ -211,10 +212,16 @@ class HunterClient:
         *,
         client: httpx.AsyncClient | None = None,
         base_url: str = HUNTER_BASE,
+        max_retries: int = 5,
+        base_delay: float = 0.5,
+        max_delay: float = 30.0,
     ) -> None:
         self.api_key = api_key
         self._client = client
         self.base_url = base_url.rstrip("/")
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.max_delay = max_delay
 
     async def domain_search(self, domain: str, limit: int = 50) -> HunterPattern | None:
         if not self.api_key or not domain:
@@ -224,9 +231,15 @@ class HunterClient:
             http = self._client or httpx.AsyncClient(timeout=15.0)
             owns = self._client is None
             try:
-                response = await http.get(
+                response = await request_with_backoff(
+                    http,
+                    "GET",
                     url,
                     params={"domain": domain, "limit": limit, "api_key": self.api_key},
+                    max_retries=self.max_retries,
+                    base_delay=self.base_delay,
+                    max_delay=self.max_delay,
+                    vendor=VENDOR_HUNTER,
                 )
             finally:
                 if owns:
@@ -301,7 +314,9 @@ class HunterClient:
             http = self._client or httpx.AsyncClient(timeout=15.0)
             owns = self._client is None
             try:
-                response = await http.get(
+                response = await request_with_backoff(
+                    http,
+                    "GET",
                     url,
                     params={
                         "domain": domain,
@@ -309,6 +324,10 @@ class HunterClient:
                         "last_name": last,
                         "api_key": self.api_key,
                     },
+                    max_retries=self.max_retries,
+                    base_delay=self.base_delay,
+                    max_delay=self.max_delay,
+                    vendor=VENDOR_HUNTER,
                 )
             finally:
                 if owns:

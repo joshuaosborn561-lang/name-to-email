@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from finder.config import Settings
@@ -160,13 +161,61 @@ async def test_client_empty_result():
     assert row.source == "hunter_empty"
 
 
-async def test_client_429_does_not_cache_shape():
+async def test_client_429_does_not_cache_shape(monkeypatch):
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("finder.limits.asyncio.sleep", _no_sleep)
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(429, json={"errors": [{"id": "rate_limit"}]})
 
-    client = HunterClient("testkey", client=_hunter_http(handler))
+    client = HunterClient("testkey", client=_hunter_http(handler), max_retries=3)
     row = await client.domain_search("busy.test")
     assert row is None
+    assert calls["n"] == 4
+
+
+async def test_client_429_recovers_after_backoff(monkeypatch):
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("finder.limits.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("finder.limits.random.random", lambda: 0.5)
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(429, json={"errors": [{"id": "rate_limit"}]})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "domain": "busy.test",
+                    "pattern": "{first}.{last}",
+                    "accept_all": False,
+                    "emails": [],
+                }
+            },
+        )
+
+    client = HunterClient(
+        "testkey",
+        client=_hunter_http(handler),
+        max_retries=3,
+        base_delay=0.5,
+        max_delay=30.0,
+    )
+    row = await client.domain_search("busy.test")
+    assert row is not None
+    assert row.pattern == "{first}.{last}"
+    assert attempts["n"] == 2
+    assert sleeps == [pytest.approx(0.5)]
 
 
 async def test_engine_normal_pattern_from_hunter(db, settings: Settings):

@@ -42,3 +42,26 @@ async def test_no2bounce_maps_reachable():
         verdict = await n2.verify("x@y.test")
     assert verdict.status == "catchall"
     assert verdict.verifier == "no2bounce"
+
+
+@pytest.mark.asyncio
+async def test_millionverifier_retries_429(monkeypatch):
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("finder.limits.asyncio.sleep", fake_sleep)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": "rate_limit"})
+        email = str(request.url.params.get("email"))
+        return httpx.Response(200, json={"result": "ok", "email": email})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        mv = MillionVerifier("k", client=client, max_retries=3, base_delay=0.01)
+        verdict = await mv.verify("ada@example.test")
+    assert verdict.status == "valid"
+    assert calls["n"] == 2

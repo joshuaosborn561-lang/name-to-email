@@ -18,6 +18,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
+from finder.limits import configure_from_settings
 from finder.engine import (
     CostTracker,
     compute_stats,
@@ -47,6 +48,7 @@ _tasks: set[asyncio.Task] = set()
 async def lifespan(app: FastAPI):
     global settings, engine, factory
     settings = Settings.load()
+    configure_from_settings(settings)
     engine = create_engine(settings.async_database_url)
     await init_db(engine)
     factory = session_factory(engine)

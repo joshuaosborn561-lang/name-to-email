@@ -6,6 +6,14 @@ import pytest
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
+from finder.limits import reset_vendor_limits
+
+
+@pytest.fixture(autouse=True)
+def _reset_vendor_limits():
+    reset_vendor_limits()
+    yield
+    reset_vendor_limits()
 
 
 @pytest.fixture(autouse=True)

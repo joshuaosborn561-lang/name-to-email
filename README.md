@@ -59,8 +59,16 @@ Required env (see `.env.example`):
 - `DATABASE_URL`
 - `MILLIONVERIFIER_API_KEY`
 - `NO2BOUNCE_API_KEY`
-- `MAX_CONCURRENCY` (default 5)
+- `MAX_CONCURRENCY` (default 10, hard cap 20)
+- `VERIFIER_MAX_CONCURRENCY` (default 8) — in-flight MillionVerifier/No2Bounce HTTP
+- `HUNTER_MAX_CONCURRENCY` (default 5) — in-flight Hunter HTTP
 - `DEFAULT_COST_CEILING`
+
+Postgres uses `pool_size=5`, `max_overflow=0`, `pool_pre_ping=True` so this
+process stays well under a shared ~60-connection cap (for example Supabase).
+Vendor semaphores sit in front of Hunter and verifier HTTP so raising domain
+concurrency cannot exceed those vendor limits. 429/5xx responses retry with
+exponential backoff and jitter.
 
 Tables are created on API/CLI startup. Alembic is available if you prefer
 `alembic upgrade head`.

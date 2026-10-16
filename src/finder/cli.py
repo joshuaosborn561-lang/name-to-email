@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from finder.config import Settings
 from finder.db import create_engine, init_db, session_factory
+from finder.limits import configure_from_settings
 from finder.engine import compute_stats, create_run, execute_run, prepare_domain
 from finder.eval import run_eval
 from finder.export import SEGMENTS, export_segments, write_csv
@@ -31,7 +32,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 
 def _settings() -> Settings:
-    return Settings.load()
+    settings = Settings.load()
+    configure_from_settings(settings)
+    return settings
 
 
 async def _ready():

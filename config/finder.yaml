@@ -127,9 +127,12 @@ verifiers:
       - catchall
 
 rate_limit:
+  # HTTP retries for verifiers and Hunter. Delay is exponential with jitter.
   max_retries: 5
   base_delay_seconds: 0.5
   max_delay_seconds: 30
+  # In-flight caps live in env: MAX_CONCURRENCY, VERIFIER_MAX_CONCURRENCY,
+  # HUNTER_MAX_CONCURRENCY. Domain fan-out must not exceed vendor limits.
 
 eval:
   holdout_size: 50
